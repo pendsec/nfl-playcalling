@@ -1,0 +1,50 @@
+# ── V1 — Walking Skeleton ──────────────────────────────────────────────────
+# Scope (per CLAUDE.md): 3rd downs only, one team's defense, 3 seasons,
+# 4 actions {man, zone} x {blitz, no-blitz}.
+# Models: logistic pi_b, ridge Q on EPA, Direct Method OPE,
+#         behavior-constrained greedy policy.
+# This file is the single source of truth for the V1 run.
+
+version: v1
+
+data:
+  source: nflfastR            # nflfastR | synthetic
+  team: SF                    # defense under study
+  seasons: [2021, 2022, 2023]
+  down: 3                     # 3rd downs only
+  holdout_season: 2023        # time-aware split: hold out the last season
+  cache_dir: data/raw
+  processed_dir: data/processed
+
+action:
+  # 4-action space = coverage shell x pressure
+  blitz_rusher_threshold: 5   # >= this many pass rushers => blitz
+  # Plays without a charted man/zone label are dropped in V1 (noisy-label
+  # discipline: inferred coverage treated as latent, not ground truth).
+  drop_uncharted_coverage: true
+
+reward:
+  # Defense wants to minimize offensive EPA, so reward = -EPA (maximize).
+  negate_epa: true
+
+behavior_model:                # pi_b(A|S)
+  type: logistic
+  C: 1.0
+  max_iter: 1000
+  cross_fit_folds: 5
+
+outcome_model:                 # Q(S, A) = E[R | S, do(A)]
+  type: ridge
+  alpha: 1.0
+
+policy:                        # behavior-constrained greedy
+  support_threshold: 0.05      # only consider actions with pi_b(a|s) >= this
+
+ope:
+  clip_propensity: [0.01, 0.99]
+
+seed: 42
+
+synthetic:                     # used only when data.source == synthetic
+  n_plays: 4000
+  seed: 7
