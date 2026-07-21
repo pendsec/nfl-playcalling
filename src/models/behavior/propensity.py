@@ -37,6 +37,10 @@ class BehaviorModel:
         Classes absent from training get probability 0; the row is then
         renormalized after clipping so each row sums to 1.
         """
+        # predict_proba only returns columns for classes seen in training, in
+        # `classes_` order. Scatter them back into a full n_actions-wide matrix
+        # so column j always means action j; any action never seen in training
+        # stays 0 here and is handled by the clip+renormalize below.
         proba = self.pipeline.predict_proba(df)
         full = np.zeros((len(df), self.n_actions))
         full[:, self.classes_] = proba

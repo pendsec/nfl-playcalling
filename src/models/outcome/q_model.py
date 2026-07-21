@@ -37,6 +37,9 @@ class QModel:
         phi = self.prep.transform(df[self.state_cols])
         n = phi.shape[0]
         out = np.zeros((n, self.n_actions))
+        # Counterfactual sweep: hold the state fixed and force every row to each
+        # action in turn. Column a is Q(s, do(A=a)) for all states — this is what
+        # OPE and the greedy argmax consume to compare calls in the same state.
         for a in range(self.n_actions):
             actions = np.full(n, a)
             out[:, a] = self.ridge.predict(_design(phi, actions, self.n_actions))

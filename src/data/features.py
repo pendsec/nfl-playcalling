@@ -116,6 +116,9 @@ def _label_actions(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     is_blitz = (rushers >= thr).astype(int)
     man = is_man.astype(int).to_numpy()
 
+    # Pack the two binary axes into one action id: 2*man + blitz. This is the
+    # exact encoding ACTION_LABELS decodes (0 zone/no, 1 zone/blitz, 2 man/no,
+    # 3 man/blitz), so the id doubles as an index into the 4-action space.
     df["action"] = man * 2 + is_blitz.to_numpy()
     df["action_label"] = df["action"].map(ACTION_LABELS)
     return df
