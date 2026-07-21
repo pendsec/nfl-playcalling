@@ -12,7 +12,6 @@ silently break inverse-weighting downstream.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
@@ -21,30 +20,8 @@ from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.pipeline import Pipeline
 
 from ..preprocess import build_state_preprocessor
-from ...data.features import Dataset
-
-
-@dataclass
-class BehaviorModel:
-    pipeline: Pipeline
-    classes_: np.ndarray          # action ids the model can output, sorted
-    n_actions: int
-    clip: tuple[float, float]
-
-    def propensity(self, df: pd.DataFrame) -> np.ndarray:
-        """P(A=a | S) for every action a, shape (n, n_actions).
-
-        Classes absent from training get probability 0; the row is then
-        renormalized after clipping so each row sums to 1.
-        """
-        # predict_proba only returns columns for classes seen in training, in
-        # `classes_` order. Scatter them back into a full n_actions-wide matrix
-        # so column j always means action j; any action never seen in training
-        # stays 0 here and is handled by the clip+renormalize below.
-        proba = self.pipeline.predict_proba(df)
-        full = np.zeros((len(df), self.n_actions))
-        full[:, self.classes_] = proba
-        return _clip_normalize(full, self.clip)
+from ...schemas.dataset import Dataset
+from ...schemas.behavior import BehaviorModel, clip_normalize
 
 
 def fit_behavior_model(ds: Dataset, cfg: dict) -> tuple[BehaviorModel, dict]:
@@ -84,7 +61,7 @@ def _diagnose(ds: Dataset, pipe: Pipeline, model: BehaviorModel, cfg: dict) -> d
     oof = cross_val_predict(pipe, X, y, cv=skf, method="predict_proba")
     oof_full = np.zeros((len(y), ds.n_actions))
     oof_full[:, model.classes_] = oof
-    oof_full = _clip_normalize(oof_full, model.clip)
+    oof_full = clip_normalize(oof_full, model.clip)
 
     preds = oof_full.argmax(axis=1)
     base_rate = pd.Series(y).value_counts(normalize=True).max()
@@ -109,8 +86,3 @@ def _expected_calibration_error(y: np.ndarray, proba: np.ndarray, n_bins: int = 
         if m.any():
             ece += m.mean() * abs(correct[m].mean() - conf[m].mean())
     return ece
-
-
-def _clip_normalize(p: np.ndarray, clip: tuple[float, float]) -> np.ndarray:
-    p = np.clip(p, clip[0], clip[1])
-    return p / p.sum(axis=1, keepdims=True)

@@ -14,24 +14,12 @@ policy estimate can be trusted.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import numpy as np
-import pandas as pd
 
-from ..models.outcome.q_model import QModel
-from ..models.behavior.propensity import BehaviorModel
-from ..data.features import Dataset
-
-
-@dataclass
-class OPEResult:
-    value: float          # estimated mean reward per play under the policy
-    se: float             # standard error across plays
-    n: int
-
-    @property
-    def ci95(self) -> tuple[float, float]:
-        return (self.value - 1.96 * self.se, self.value + 1.96 * self.se)
+from ..schemas.dataset import Dataset
+from ..schemas.behavior import BehaviorModel
+from ..schemas.outcome import QModel
+from ..schemas.ope import OPEResult
 
 
 def dm_policy_value(q_all: np.ndarray, policy_probs: np.ndarray) -> OPEResult:

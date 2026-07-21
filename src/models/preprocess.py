@@ -5,7 +5,7 @@ from __future__ import annotations
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from ..data.features import Dataset
+from ..schemas.dataset import Dataset
 
 
 def build_state_preprocessor(ds: Dataset) -> ColumnTransformer:

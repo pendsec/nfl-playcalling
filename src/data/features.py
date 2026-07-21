@@ -13,9 +13,9 @@ downstream model needs, so feature lists are defined once, here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import numpy as np
 import pandas as pd
+
+from ..schemas.dataset import Dataset
 
 # 4-action space: coverage shell (man/zone) x pressure (blitz/no-blitz).
 ACTION_LABELS = {
@@ -36,22 +36,6 @@ NUMERIC_STATE = [
     "off_pass_tendency",
 ]
 CATEGORICAL_STATE = ["formation"]
-
-
-@dataclass
-class Dataset:
-    """A built (S, A, R) table plus the metadata models need."""
-    df: pd.DataFrame
-    numeric_state: list[str]
-    categorical_state: list[str]
-    action_col: str
-    reward_col: str
-    n_actions: int
-    action_labels: dict[int, str]
-
-    @property
-    def state_cols(self) -> list[str]:
-        return self.numeric_state + self.categorical_state
 
 
 def build_v1_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
@@ -103,14 +87,17 @@ def build_v1_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
 
 def _label_actions(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """Construct the 4-action treatment from charted nflfastR columns."""
+    # Identify man and zone coverage types
     mz = df["defense_man_zone_type"].astype("string").str.upper().fillna("")
     is_man = mz.str.contains("MAN")
     is_zone = mz.str.contains("ZONE")
 
+    # Drop unlabeled coverages
     if cfg["action"]["drop_uncharted_coverage"]:
         df = df[is_man | is_zone].copy()
         is_man = is_man[df.index]
 
+    # Identify blitz
     thr = cfg["action"]["blitz_rusher_threshold"]
     rushers = pd.to_numeric(df["number_of_pass_rushers"], errors="coerce").fillna(4)
     is_blitz = (rushers >= thr).astype(int)
@@ -126,9 +113,11 @@ def _label_actions(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
 def _build_state(df: pd.DataFrame) -> pd.DataFrame:
     """Engineer the pre-snap state vector. No post-snap information allowed."""
+    # Extract and cast game state variables
     df["score_diff"] = pd.to_numeric(df.get("score_differential"), errors="coerce").fillna(0)
     df["yardline_100"] = pd.to_numeric(df["yardline_100"], errors="coerce").fillna(50)
     df["ydstogo"] = pd.to_numeric(df["ydstogo"], errors="coerce").clip(1, 30)
+
     for c in ["game_seconds_remaining", "half_seconds_remaining", "qtr",
               "posteam_timeouts_remaining", "defteam_timeouts_remaining",
               "shotgun", "no_huddle"]:
