@@ -26,9 +26,11 @@ from ...schemas.behavior import BehaviorModel, clip_normalize
 
 def fit_behavior_model(ds: Dataset, cfg: dict) -> tuple[BehaviorModel, dict]:
     """Fit pi_b on `ds` and return the model plus in-sample diagnostics."""
+    # Get behavior model configurations
     bcfg = cfg["behavior_model"]
     clip = tuple(cfg["ope"]["clip_propensity"])
 
+    # Build training pipeline
     pipe = Pipeline([
         ("prep", build_state_preprocessor(ds)),
         ("clf", LogisticRegression(
@@ -37,6 +39,7 @@ def fit_behavior_model(ds: Dataset, cfg: dict) -> tuple[BehaviorModel, dict]:
         )),
     ])
 
+    # Fit model
     X = ds.df[ds.state_cols]
     y = ds.df[ds.action_col].to_numpy()
     pipe.fit(X, y)
@@ -45,24 +48,28 @@ def fit_behavior_model(ds: Dataset, cfg: dict) -> tuple[BehaviorModel, dict]:
         n_actions=ds.n_actions, clip=clip,
     )
 
+    # Run evaluation diagnostics
     diagnostics = _diagnose(ds, pipe, model, cfg)
     return model, diagnostics
 
 
 def _diagnose(ds: Dataset, pipe: Pipeline, model: BehaviorModel, cfg: dict) -> dict:
     """Cross-fitted accuracy, log loss, and a coarse calibration (ECE) check."""
+    # Get training data and k-fold split configuration
     X = ds.df[ds.state_cols]
     y = ds.df[ds.action_col].to_numpy()
     n_splits = min(cfg["behavior_model"]["cross_fit_folds"],
                    int(pd.Series(y).value_counts().min()))
     n_splits = max(n_splits, 2)
 
+    # Create k-splits on data, evaluate on out-of-fold set, and normalize results for positivity guard
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=cfg["seed"])
     oof = cross_val_predict(pipe, X, y, cv=skf, method="predict_proba")
     oof_full = np.zeros((len(y), ds.n_actions))
     oof_full[:, model.classes_] = oof
     oof_full = clip_normalize(oof_full, model.clip)
 
+    # Get predictions based on clipped probabilities
     preds = oof_full.argmax(axis=1)
     base_rate = pd.Series(y).value_counts(normalize=True).max()
     return {
