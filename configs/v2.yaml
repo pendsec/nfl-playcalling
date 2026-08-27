@@ -1,0 +1,70 @@
+# ── V2 — "Right Tools, Simple Problem" ──────────────────────────────────────
+# Scope (per CLAUDE.md): all downs, one team's defense, 3 seasons,
+# 12 actions = 6 coverage shells {C0,C1,C2,C3,C4,C6} x pressure {blitz,no-blitz}.
+# Models: calibrated LightGBM pi_b, per-treatment GBM Q, doubly-robust OPE,
+#         conservative (CQL/IQL-style) policy, Rosenbaum sensitivity analysis.
+# This file is the single source of truth for the V2 run. V1 lives at git tag v1.
+
+version: v2
+
+data:
+  source: nflfastR            # nflfastR | synthetic
+  team: SF                    # defense under study
+  seasons: [2021, 2022, 2023]
+  down: all                   # all downs (int to restrict to one down)
+  holdout_season: 2023        # time-aware split: hold out the last season
+  cache_dir: data/raw
+  processed_dir: data/processed
+
+action:
+  # 12-action space = coverage shell (6) x pressure (blitz / no-blitz).
+  blitz_rusher_threshold: 5   # >= this many pass rushers => blitz
+  # Off-taxonomy coverages (NaN, PREVENT, 2_MAN) are dropped (noisy-label
+  # discipline: inferred coverage treated as latent, not ground truth).
+  drop_uncharted_coverage: true
+
+reward:
+  # Defense wants to minimize offensive EPA, so reward = -EPA (maximize).
+  negate_epa: true
+
+behavior_model:                # pi_b(A|S) — calibrated LightGBM
+  type: lightgbm
+  n_estimators: 300
+  learning_rate: 0.05
+  max_depth: 5
+  min_child_samples: 30
+  subsample: 0.8
+  colsample_bytree: 0.8
+  calibration_folds: 3         # isotonic calibration CV
+  cross_fit_folds: 3           # OOF folds for calibration diagnostics
+
+outcome_model:                 # Q(S, A) = E[R | S, do(A)] — per-treatment GBM
+  type: lightgbm
+  n_estimators: 300
+  learning_rate: 0.05
+  max_depth: 5
+  min_child_samples: 20
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_cell: 20                 # actions with fewer plays fall back to a mean
+  cross_fit_folds: 5           # OOF folds for the DR smoke test on train
+
+policy:                        # conservative (behavior-regularized) policy
+  alpha: 0.05                  # KL-to-behavior conservatism weight
+  support_threshold: 0.05      # hard floor: only consider pi_b(a|s) >= this
+
+ope:
+  clip_propensity: [0.01, 0.99]
+  weight_clip: 20.0            # cap on DR importance weights (switch-DR)
+
+sensitivity:
+  gamma_range: [1.0, 1.5, 2.0, 3.0]  # Rosenbaum confounding odds ratios
+
+positivity:
+  min_count: 10               # per-(stratum, action) support threshold
+
+seed: 42
+
+synthetic:                     # used only when data.source == synthetic
+  n_plays: 9000
+  seed: 7

@@ -61,25 +61,31 @@ Shadow mode in practice -> shadow model in games -> live decision support. Per-s
 
 The walking skeleton at V1 is the highest-priority step. A pipeline that gives obviously-wrong answers in week 2 is far better than a "correct" pipeline that ships in month 18. 
 
+Every version ships a narrated demo notebook (`notebooks/vN_pipeline_walkthrough.ipynb`) as an explicit deliverable — see the Demo bullets below and the demo-notebook convention.
+
 ### V1 - Walking Skeleton
 - **Scope**: 3rd downs only, one team's defense, 3 seasons, action space = {man, zone, blitz yes/no} (4 actions).
 - **Models**: logistic π_b, ridge Q-regression on EPA, Direct Method OPE, behavior-constrained greedy policy.
 - **Goal**: end-to-end pipeline that produces and evaluates a policy. Probably wrong in places, but debuggable.
+- **Demo**: `notebooks/v1_pipeline_walkthrough.ipynb` — narrated end-to-end walkthrough, including the deliberately-wrong parts (off-support DM blow-up). Preserved at git tag `v1`.
 
 ### V2 - Right Tools, Simple Problem
 - **Scope**: all downs, one team, 12 actions (coverage shell x pressure).
 - **Models**: GBM π_b with calibration, GBM Q-model with proper feature selection from SCM, doubly robust OPE, CQL/IQL policy.
 - **Add**: sensitivity analysis bounding impact of unobserved confounders.
+- **Demo**: `notebooks/v2_pipeline_walkthrough.ipynb` — real-data narrative (action sparsity, DAG + DoWhy identification, positivity heatmap, calibration curve, DR recovery, sensitivity band) plus a synthetic ground-truth validation aside.
 
 ### V3 - Scale and Transfer
 - **Scope**: multi-team, factored 50+ action space.
 - **Models**: neural π_b and Q-model with embeddings (team, QB, OC), invariant policy learning across seasons/teams, hierarchical factored policy.
 - **Add**: explainability layer surfacing top causal features per recommendation.
+- **Demo**: `notebooks/v3_pipeline_walkthrough.ipynb` — multi-team transfer story: cross-team/season OPE, invariance checks, hierarchical-policy drill-down, and the per-recommendation causal-feature explanations.
 
 ### V4 - Power-Ups
 - **Scope**: tracking-data features, structural simulator, full deployment loop. 
 - **Models**: neural SCM, counterfactual data augmentation validated against real-data OPE.
 - **Add**: shadow-mode deployment with per-recommendation confidence and drift monitoring.
+- **Demo**: `notebooks/v4_pipeline_walkthrough.ipynb` — tracking-derived features, structural counterfactual rollouts validated against real-data OPE, and a shadow-mode deployment walkthrough with confidence + drift panels.
 
 ---
 
@@ -129,6 +135,12 @@ tests/              # unit + integration; synthetic SCM regression tests
 ### Validation discipline
 - Synthetic SCM regression tests: simulate data from a known SCM, run the pipeline, verify recovered effects match truth. Run on every PR to OPE / Q-model / propensity code.
 - Coach-in-the-loop sanity checks for V2+ recommendations. If a domain expert can't construct the causal story the recommendation isn't ready.
+
+### Demo-notebook discipline
+- Each version ships `notebooks/vN_pipeline_walkthrough.ipynb` as an explicit deliverable: a narrated, plotted, end-to-end run of that version's pipeline with a per-stage explanation. It is not optional polish — a version isn't done until its demo notebook exists.
+- The notebook must execute clean top-to-bottom before merge (`python -m nbconvert --to notebook --execute --inplace notebooks/vN_pipeline_walkthrough.ipynb`); a failing or stale notebook blocks merge like a failing test.
+- Real-data narrative with a synthetic ground-truth validation aside (V2+), so every headline OPE claim is checkable against a known SCM.
+- When a version is superseded, freeze its notebook at that version's git tag rather than letting it rot against `HEAD`.
 
 ---
 
