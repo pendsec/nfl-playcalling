@@ -16,7 +16,13 @@ Two jobs:
 
 The adjustment set comes from `scm.graph` so the DAG stays the single source of
 truth — `assert_adjustment_consistency` guards against drift between the declared
-SCM and the engineered features.
+SCM and the engineered features, and against a mediator or a selection variable
+turning up among them.
+
+Note what identification here does NOT cover: the estimand is conditional on
+`coverage_charted = 1` (see `scm.graph.SELECTION`). DoWhy is answering "is the
+effect backdoor-identified within the charted-dropback population", which is a
+narrower question than the one a coach would ask.
 """
 
 from __future__ import annotations
@@ -45,6 +51,16 @@ def assert_adjustment_consistency(ds: Dataset) -> list[str]:
     leaked = [m for m in scm.MEDIATORS if m in ds.state_cols]
     if leaked:
         raise ValueError(f"Post-snap mediator(s) leaked into the state: {leaked}")
+    # Every modelled row has the selection indicator = 1 by construction, so as a
+    # feature it is a constant that silently reads as "no assumption made". The
+    # assumption belongs in the graph and the limitations section, not the design
+    # matrix.
+    selected = [c for c in scm.SELECTION if c in ds.state_cols]
+    if selected:
+        raise ValueError(
+            f"Selection variable(s) used as state features: {selected}. The sample "
+            "is conditioned on these; they cannot also be adjusted for."
+        )
     # State and adjustment set must be the same thing by construction.
     extra = set(ds.state_cols) - set(declared)
     if extra:
@@ -151,7 +167,8 @@ def visualize_dag(save_path: str) -> None:
     color = {n: ("#D0021B" if n == scm.TREATMENT else
                  "#2C3E50" if n == scm.OUTCOME else
                  "#9B59B6" if n in scm.UNOBSERVED else
-                 "#E87040" if n in scm.MEDIATORS else "#4A90D9")
+                 "#E87040" if n in scm.MEDIATORS else
+                 "#7F8C8D" if n in scm.SELECTION else "#4A90D9")
              for n in g.nodes()}
     fig, ax = plt.subplots(figsize=(11, 8))
     pos = nx.spring_layout(g, seed=1)

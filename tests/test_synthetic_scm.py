@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data.load import generate_synthetic, true_policy_value
 from src.data.features import build_dataset, time_aware_split
+from src.schemas.dataset import Dataset
 from src.scm import graph as scm
 from src.scm import identify
 from src.models.behavior.propensity import fit_behavior_model
@@ -450,3 +451,61 @@ def test_alpha_actually_moves_the_policy_toward_supported_calls(fitted):
         support.append(float(pi_b[idx, out["chosen"]].mean()))
 
     assert support[0] < support[1] < support[2], support
+
+# ── DAG structural claims (v2.1) ─────────────────────────────────────────────
+def test_declared_mediator_is_actually_a_mediator():
+    """A variable in MEDIATORS must be a descendant of the treatment.
+
+    Through v2.0 `off_playcall` was declared a mediator but had no incoming edge
+    from `def_playcall`, so nothing in the graph made it one — the label and the
+    structure disagreed, and only the label was ever read.
+    """
+    children_of_treatment = {t for s_, t in scm.EDGES if s_ == scm.TREATMENT}
+    for m in scm.MEDIATORS:
+        assert m in children_of_treatment, (
+            f"{m} is declared a mediator but the treatment has no edge into it"
+        )
+
+
+def test_selection_node_is_a_collider_on_a_treatment_outcome_path():
+    """The selection the dataset performs must be visible in the graph.
+
+    Every modelled row has coverage_charted = 1. That node takes both
+    `off_playcall` (runs are ~3% charted) and `epa` (a sack leaves no shell) as
+    parents, which is what makes selecting on it both block part of the total
+    effect and open a non-causal path.
+    """
+    assert scm.SELECTION, "the dataset is selected on something; say what"
+    for sel in scm.SELECTION:
+        parents = {s_ for s_, t in scm.EDGES if t == sel}
+        assert len(parents) >= 2, f"{sel} is not a collider: parents={parents}"
+        assert scm.OUTCOME in parents
+        # ...and reachable from the treatment, or selecting on it would be benign.
+        assert parents & ({scm.TREATMENT} | scm.MEDIATORS)
+
+
+def test_selection_variables_cannot_be_used_as_features(fitted):
+    """Adjusting for a variable the sample is conditioned on is a contradiction."""
+    ds = fitted["ds"]
+    assert not (set(scm.SELECTION) & set(ds.state_cols))
+
+    polluted = Dataset(
+        df=ds.df.assign(**{c: 1 for c in scm.SELECTION}),
+        numeric_state=ds.numeric_state + sorted(scm.SELECTION),
+        categorical_state=ds.categorical_state, action_col=ds.action_col,
+        reward_col=ds.reward_col, n_actions=ds.n_actions,
+        action_labels=ds.action_labels,
+    )
+    with pytest.raises(ValueError, match="[Ss]election"):
+        identify.assert_adjustment_consistency(polluted)
+
+
+def test_graph_version_was_bumped_for_the_structural_change():
+    """Structural edits must move GRAPH_VERSION, not just the fingerprint.
+
+    The fingerprint catches an unversioned edit after the fact; the version is
+    what a human reads on a stored estimate. v2.0 predates the mediator edge and
+    the selection node, so an estimate stamped v2.0 assumed a different graph.
+    """
+    assert scm.GRAPH_VERSION >= "v2.1"
+    assert scm.version_tag().startswith(scm.GRAPH_VERSION + "+")

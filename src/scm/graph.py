@@ -7,11 +7,25 @@ downstream model conditions on. The key rulings:
   * adjustment set = observed pre-snap confounders (game state, offensive
     personnel/formation, offensive tendencies, player/unit proxies). This is the
     backdoor set for def_playcall -> epa given the observed variables.
-  * off_playcall is a post-snap MEDIATOR/competing-cause and is NEVER conditioned
-    on when estimating the call's total effect (the Q-model obeys this).
+  * off_playcall is a MEDIATOR and is NEVER conditioned on when estimating the
+    call's total effect (the Q-model obeys this). The defense calls its play
+    pre-snap, and the look it shows drives the offense's audible / RPO read, so
+    def_playcall -> off_playcall is a real edge: part of what a call does is
+    change whether the offense runs at all.
   * coach_read is the UNOBSERVED confounder U: (S,U) -> def_playcall and
     (S,U) -> epa. Conditioning on the observed set leaves residual confounding
     through coach_read — the explicit caveat the V2 sensitivity analysis bounds.
+  * coverage_charted is a SELECTION node, and the one the V2 dataset is built by
+    conditioning on. A coverage shell only exists as a label where NGS charted
+    one, so every modelled row has coverage_charted = 1. That is not innocuous:
+    charting depends on off_playcall (runs are charted ~3% of the time vs ~94%
+    of dropbacks) and on how the play resolved (a sack, scramble or throwaway
+    leaves no shell to label), which makes it a collider on
+    def_playcall -> off_playcall -> coverage_charted <- epa. Selecting on it
+    therefore both BLOCKS the run/pass-deterrence portion of the total effect
+    and OPENS a non-causal path. See `SELECTION_NOTES` for the measured size of
+    each, and the README's limitations section for what it means for the
+    estimand.
 
 The abstract structural nodes below document the mechanism; the concrete
 `CONFOUNDER_COLUMNS` map ties each node to the engineered feature columns so the
@@ -30,19 +44,43 @@ OFF_FORMATION = "off_formation"  # formation, shotgun, no-huddle
 OFF_TENDENCIES = "off_tendencies"  # rolling offensive pass tendency
 PLAYER_PROXIES = "player_proxies"  # QB / defensive-unit quality (historical EPA)
 COACH_READ = "coach_read"        # UNOBSERVED confounder U (matchup intuition / film)
-OFF_PLAYCALL = "off_playcall"    # offense's call — post-snap MEDIATOR (excluded)
+OFF_PLAYCALL = "off_playcall"    # offense's run/pass call — MEDIATOR (excluded)
 DEF_PLAYCALL = "def_playcall"    # treatment A
 EPA = "epa"                      # outcome R (reward = -EPA)
+CHARTED = "coverage_charted"     # SELECTION: was a coverage shell labeled at all?
 
 OBSERVED_CONFOUNDERS = [
     GAME_STATE, OFF_PERSONNEL, OFF_FORMATION, OFF_TENDENCIES, PLAYER_PROXIES,
 ]
-OBSERVED = set(OBSERVED_CONFOUNDERS) | {OFF_PLAYCALL, DEF_PLAYCALL, EPA}
+OBSERVED = set(OBSERVED_CONFOUNDERS) | {OFF_PLAYCALL, DEF_PLAYCALL, EPA, CHARTED}
 UNOBSERVED = {COACH_READ}
 
 TREATMENT = DEF_PLAYCALL
 OUTCOME = EPA
 MEDIATORS = {OFF_PLAYCALL}
+
+# Variables the sample is selected ON, rather than adjusted for. Every modelled
+# row has CHARTED = 1 by construction of the dataset, so this is an assumption
+# the estimates carry whether or not it is written down — which is why it is
+# written down, and hashed into the graph fingerprint.
+SELECTION = {CHARTED}
+
+# Measured on the V2 slice (SF, 2021-2023), so the strength of each selection
+# path is a number rather than a worry. Kept next to the edges they qualify.
+SELECTION_NOTES = {
+    "charting_rate_pass": 0.936,   # dropbacks carry a shell label
+    "charting_rate_run": 0.030,    # runs essentially never do -> runs are excluded
+    "dropped_pass_plays": 242,     # charted-NaN dropbacks, dropped from the slice
+    # The dropped dropbacks are the defense's BEST outcomes (sacks, scrambles,
+    # throwaways resolve no shell), so selection shifts the reward level:
+    "mean_reward_kept": -0.036,
+    "mean_reward_dropped": +0.922,
+    # ...but near-identically across the pressure axis (9.3% of blitzes dropped
+    # vs 9.4% of non-blitzes), so it moves every policy's level together rather
+    # than distorting the contrast OPE actually compares.
+    "drop_rate_blitz": 0.093,
+    "drop_rate_no_blitz": 0.094,
+}
 
 # Directed edges (parent -> child).
 EDGES = [
@@ -55,8 +93,15 @@ EDGES = [
     (PLAYER_PROXIES, DEF_PLAYCALL), (PLAYER_PROXIES, EPA),
     (OFF_PLAYCALL, EPA),
     (DEF_PLAYCALL, EPA),                 # the causal effect we want
+    (DEF_PLAYCALL, OFF_PLAYCALL),        # the look drives audibles / RPO reads,
+                                         # so off_playcall is a genuine mediator
     (COACH_READ, DEF_PLAYCALL),          # unobserved confounding into the call
     (COACH_READ, EPA),                   # unobserved confounding into the outcome
+    (OFF_PLAYCALL, CHARTED),             # coverage is charted on dropbacks only
+    (EPA, CHARTED),                      # shorthand for "the play broke down":
+                                         # a sack/scramble is both a great
+                                         # defensive outcome and unchartable, so
+                                         # selection depends on the outcome
 ]
 
 # ── Abstract node -> concrete feature columns ────────────────────────────────
@@ -86,14 +131,17 @@ CONFOUNDER_COLUMNS = {
 # mediator, and unobserved). `fingerprint()` is the machine-facing guard: it
 # hashes the actual structure, so an edit that someone forgets to version-bump
 # still shows up as a different fingerprint on the stored estimate.
-GRAPH_VERSION = "v2.0"
+# v2.1 — added def_playcall -> off_playcall (making the declared mediator an
+# actual one) and the coverage_charted selection node. Both are structural
+# claims, so every estimate stamped v2.0 was computed under a different graph.
+GRAPH_VERSION = "v2.1"
 
 
 def fingerprint() -> str:
     """Short content hash of the DAG's structural claims.
 
-    Covers the edge list, the observed/unobserved split, the mediator set, and
-    the concrete adjustment columns — i.e. everything that changes what the
+    Covers the edge list, the observed/unobserved split, the mediator and
+    selection sets, and the concrete adjustment columns — i.e. everything that changes what the
     backdoor adjustment means. Two estimates with the same GRAPH_VERSION but
     different fingerprints were computed under different graphs.
     """
@@ -104,6 +152,7 @@ def fingerprint() -> str:
         ";".join(sorted(OBSERVED)),
         ";".join(sorted(UNOBSERVED)),
         ";".join(sorted(MEDIATORS)),
+        ";".join(sorted(SELECTION)),
         f"{TREATMENT}->{OUTCOME}",
         ";".join(adjustment_columns()),
     ])
@@ -152,5 +201,7 @@ def describe() -> str:
         f"    -> {len(adjustment_columns())} feature columns\n"
         f"  mediators (do NOT condition on): {sorted(MEDIATORS)}\n"
         f"  unobserved confounders: {sorted(UNOBSERVED)} "
-        f"(bounded by the sensitivity analysis)"
+        f"(bounded by the sensitivity analysis)\n"
+        f"  SELECTED ON: {sorted(SELECTION)} = 1 — the estimand is conditional on\n"
+        f"    a charted dropback, so run/pass deterrence is outside it"
     )

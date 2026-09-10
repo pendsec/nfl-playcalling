@@ -37,6 +37,8 @@ Play-level dataset: state features, action taken, outcome. Includes feature engi
 ### Step 2: Causal Graph (SCM Skeleton)
 Hand-built DAG over project variables encoding confounders, mediators, colliders, and instruments. Disciplines what to condition on in every downstream model. Validated with conditional independence tests.
 
+**V2 note**: the DAG also declares what the sample is SELECTED on, not just what is adjusted for. `coverage_charted` is a selection node with both `off_playcall` and `epa` as parents, because coverage labels exist on ~94% of dropbacks and ~3% of runs. That makes V2's estimand conditional on a charted dropback — run/pass deterrence is outside it — and it is hashed into the graph fingerprint so no estimate can quietly shed the assumption.
+
 ### Step 3: Behavior Policy Model - π_b(A|S)
 Classifier predicting what defensive call the actual DC made in state S. Heart of IPW reweighting and doubly robust OPE. Calibration is critical; positivity violations bound how aggressive the learned policy can be.
 
