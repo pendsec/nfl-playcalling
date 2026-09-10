@@ -45,6 +45,41 @@ def _make_regressor(cfg: dict):
     )
 
 
+def _within_state_spread(q_all: np.ndarray) -> float:
+    """Mean per-state standard deviation of Q across actions.
+
+    Uses the *within-state* spread rather than the global one because that is
+    what a policy's argmax actually compares: how far apart the calls are in a
+    single situation. Floored away from zero so a degenerate Q (every action
+    identical) cannot silently disable a penalty that divides by it.
+    """
+    return max(float(np.mean(q_all.std(axis=1))), 1e-6)
+
+
+def _shrunk_cell_mean(y_cell: np.ndarray, global_mean: float,
+                      prior_strength: float) -> float:
+    """Empirical-Bayes mean for an action cell too thin to fit a regressor.
+
+    The raw cell mean is a terrible constant when the cell holds a handful of
+    plays: on real data one 9-play cell averaged -2.30 reward against a global
+    mean near -0.09, and because that constant enters `predict_all_actions` for
+    EVERY state, it dominated the policy's argmax everywhere — a phantom "never
+    call this" (or, with the sign flipped, "always call this") learned from nine
+    snaps of noise.
+
+    Shrinking toward the global mean with prior weight `prior_strength` (the same
+    `min_cell` threshold that declared the cell too thin) makes the fallback
+    degrade gracefully: a cell just under the threshold keeps most of its own
+    signal, a 1-play cell collapses to roughly the global mean, and no cell can
+    manufacture an extreme Q from a sample that small.
+    """
+    n = len(y_cell)
+    if n == 0:
+        return global_mean
+    return float((n * float(y_cell.mean()) + prior_strength * global_mean)
+                 / (n + prior_strength))
+
+
 def _check_conditions_on_adjustment_set(ds: Dataset) -> None:
     """Guard: the state we condition on must equal the SCM adjustment set."""
     if set(ds.state_cols) != set(scm.adjustment_columns()):
@@ -68,7 +103,7 @@ def fit_q_model(ds: Dataset, cfg: dict) -> QModel:
     fallbacks: dict[int, float] = {}
     for a in range(ds.n_actions):
         m = T == a
-        fallbacks[a] = float(y[m].mean()) if m.any() else global_mean
+        fallbacks[a] = _shrunk_cell_mean(y[m], global_mean, min_cell)
         if m.sum() >= min_cell:
             reg = _make_regressor(cfg)
             reg.fit(phi[m], y[m])
@@ -76,8 +111,12 @@ def fit_q_model(ds: Dataset, cfg: dict) -> QModel:
         else:
             regressors[a] = None
 
-    return QModel(prep=prep, regressors=regressors, fallbacks=fallbacks,
-                  n_actions=ds.n_actions, state_cols=ds.state_cols)
+    model = QModel(prep=prep, regressors=regressors, fallbacks=fallbacks,
+                   n_actions=ds.n_actions, state_cols=ds.state_cols)
+    # Measured on the training states, so every downstream policy shares one
+    # scale regardless of which split it is constructed against.
+    model.q_scale = _within_state_spread(model.predict_all_actions(ds.df))
+    return model
 
 
 def crossfit_q(ds: Dataset, cfg: dict) -> np.ndarray:
@@ -105,5 +144,5 @@ def crossfit_q(ds: Dataset, cfg: dict) -> np.ndarray:
                 reg.fit(phi[m], y[m])
                 mu[va, a] = reg.predict(phi[va])
             else:
-                mu[va, a] = y[m].mean() if len(m) else global_mean
+                mu[va, a] = _shrunk_cell_mean(y[m], global_mean, min_cell)
     return mu

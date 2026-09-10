@@ -22,11 +22,13 @@ import numpy as np
 from ..schemas.dataset import Dataset
 from ..schemas.behavior import BehaviorModel
 from ..schemas.outcome import QModel
+from ..scm.graph import version_tag
 from ..schemas.ope import OPEResult
 from .doubly_robust import dr_policy_value
 
 
-def dm_policy_value(q_all: np.ndarray, policy_probs: np.ndarray) -> OPEResult:
+def dm_policy_value(q_all: np.ndarray, policy_probs: np.ndarray,
+                    policy_name: str = "unspecified") -> OPEResult:
     """Direct-Method value of a (possibly stochastic) policy.
 
     q_all, policy_probs: shape (n, n_actions). policy_probs rows sum to 1.
@@ -36,6 +38,9 @@ def dm_policy_value(q_all: np.ndarray, policy_probs: np.ndarray) -> OPEResult:
         value=float(per_play.mean()),
         se=float(per_play.std(ddof=1) / np.sqrt(len(per_play))),
         n=len(per_play),
+        estimator="DM",
+        policy=policy_name,
+        graph_version=version_tag(),
     )
 
 
@@ -63,12 +68,13 @@ def behavior_recovery_check(
         q_all = q.predict_all_actions(df)
     pi_b = beh.propensity(df)
 
-    dm_pi_b = dm_policy_value(q_all, pi_b)
+    dm_pi_b = dm_policy_value(q_all, pi_b, policy_name="behavior")
     dr_pi_b = dr_policy_value(q_all, pi_b, pi_b, actions, rewards,
-                             weight_clip=weight_clip)
+                              weight_clip=weight_clip, policy_name="behavior")
 
     tol = max(2 * empirical_se, 0.02)
     return {
+        "graph_version": dr_pi_b.graph_version,
         "empirical_reward": empirical,
         "empirical_se": empirical_se,
         "dm_taken_action": float(q_all[np.arange(len(df)), actions].mean()),

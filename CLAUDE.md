@@ -44,7 +44,9 @@ Classifier predicting what defensive call the actual DC made in state S. Heart o
 Predicts E[R | S, do(A)] - the *interventional* outcome, not observational. Built using only confounders + state features per the SCM (mediators excluded). Eventually grows into a structural causal model supporting counterfactual rollouts.
 
 ### Step 5: Off-Policy Evaluation (OPE)
-Unbiased estimator of any candidate policy's value from logged data. Direct Method -> IPW -> Doubly Robust -> sensitivity analysis for unobserved confounders. The judge of every candidate policy. Validate by recovering the behavior policy's known average reward. 
+Unbiased estimator of any candidate policy's value from logged data. Direct Method -> IPW -> Doubly Robust -> sensitivity analysis for unobserved confounders. The judge of every candidate policy. Validate by recovering the behavior policy's known average reward.
+
+**V2 note**: V2 ships DM and DR (whose IPW correction term does the reweighting) but no *standalone* IPW estimator. On single-team data with an ESS ratio this low, a pure-IPW number would be dominated by a handful of tiny propensities and would add variance without adding a decision. The standalone rung is deferred to V3, where multi-team pooling makes it informative and the notebook can show the full DM -> IPW -> DR ladder side by side. 
 
 ### Step 6: Policy Learning
 The actual π*(A|S). Behavior-constrained greedy -> CQL/IQL -> causal-pessimism -> invariant policy learning across teams/seasons -> hierarchical factored policy.
@@ -70,15 +72,15 @@ Every version ships a narrated demo notebook (`notebooks/vN_pipeline_walkthrough
 - **Demo**: `notebooks/v1_pipeline_walkthrough.ipynb` — narrated end-to-end walkthrough, including the deliberately-wrong parts (off-support DM blow-up). Preserved at git tag `v1`.
 
 ### V2 - Right Tools, Simple Problem
-- **Scope**: all downs, one team, 12 actions (coverage shell x pressure).
+- **Scope**: all downs, one team, 12 actions (coverage shell x pressure). Charted dropbacks only — the coverage axis comes from NGS pass charting, so runs are ~3% labeled and are excluded explicitly via `data.play_types` rather than incidentally by the uncharted-coverage drop.
 - **Models**: GBM π_b with calibration, GBM Q-model with proper feature selection from SCM, doubly robust OPE, CQL/IQL policy.
-- **Add**: sensitivity analysis bounding impact of unobserved confounders.
+- **Add**: sensitivity analysis bounding impact of unobserved confounders; OPE provenance (every estimate stamped with estimator + causal-graph version + its sensitivity bound); the version-over-version regression gate in `src/evaluation/`.
 - **Demo**: `notebooks/v2_pipeline_walkthrough.ipynb` — real-data narrative (action sparsity, DAG + DoWhy identification, positivity heatmap, calibration curve, DR recovery, sensitivity band) plus a synthetic ground-truth validation aside.
 
 ### V3 - Scale and Transfer
 - **Scope**: multi-team, factored 50+ action space.
 - **Models**: neural π_b and Q-model with embeddings (team, QB, OC), invariant policy learning across seasons/teams, hierarchical factored policy.
-- **Add**: explainability layer surfacing top causal features per recommendation.
+- **Add**: explainability layer surfacing top causal features per recommendation; standalone IPW estimator to complete the DM -> IPW -> DR ladder (deferred from V2 — see Step 5); econml CATE estimators.
 - **Demo**: `notebooks/v3_pipeline_walkthrough.ipynb` — multi-team transfer story: cross-team/season OPE, invariance checks, hierarchical-policy drill-down, and the per-recommendation causal-feature explanations.
 
 ### V4 - Power-Ups

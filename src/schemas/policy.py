@@ -7,14 +7,24 @@ conservative policy is compared against via DR-OPE.
 `ConservativePolicy` — the V2 policy. In this single-step contextual-bandit
 setting, CQL/IQL reduce to a behavior-regularized (KL-to-pi_b) argmax:
 
-    pi*(s) = argmax_a  [ Q(s, a) + alpha * log pi_b(a | s) ]   s.t. support floor
+    pi*(s) = argmax_a  [ Q(s, a) + alpha * q_scale * log pi_b(a | s) ]
+             subject to the support floor
 
-The `alpha * log pi_b` term is the conservatism/pessimism penalty: low-support
-actions carry a large negative log-propensity, so the policy is pulled toward
-calls the DC actually makes unless Q is confidently higher. alpha -> 0 recovers
-greedy; alpha -> inf recovers the behavior mode. Full *sequential* CQL/IQL
-(bootstrapped targets, expectile value) only becomes meaningful in V3+ once
-drive-level transitions enter — here there is a single step, so no bootstrap.
+The penalty term is the conservatism/pessimism penalty: low-support actions
+carry a large negative log-propensity, so the policy is pulled toward calls the
+DC actually makes unless Q is confidently higher. alpha -> 0 recovers greedy;
+alpha -> inf recovers the behavior mode. Full *sequential* CQL/IQL (bootstrapped
+targets, expectile value) only becomes meaningful in V3+ once drive-level
+transitions enter — here there is a single step, so no bootstrap.
+
+`q_scale` is what makes alpha portable. Q is measured in reward(-EPA) units whose
+spread depends entirely on the data and the fit, while log pi_b is in nats — so a
+bare `alpha` silently means something different for every model. Expressing the
+penalty in units of the typical within-state Q spread (`QModel.q_scale`) fixes
+that: alpha is then "how many standard deviations of within-state Q advantage a
+call must show to justify one nat of departure from the DC". At alpha=0.5 a call
+sitting an order of magnitude less likely than the DC's (about 2.3 nats) has to
+beat it by more than a full sigma of Q to be recommended.
 """
 
 from __future__ import annotations
@@ -65,6 +75,7 @@ class ConservativePolicy:
     alpha: float
     support_threshold: float
     n_actions: int
+    q_scale: float = 1.0   # units of Q per nat; see module docstring
 
     def act(self, df: pd.DataFrame) -> dict:
         """Return per-state Q, propensities, conservative scores, and choice."""
@@ -72,9 +83,11 @@ class ConservativePolicy:
         pi_b = self.beh.propensity(df)
         support = pi_b >= self.support_threshold
 
-        # Conservative score: Q plus a KL-to-behavior penalty. log of the
-        # (clipped) propensity is a large negative for low-support calls.
-        scores = q_all + self.alpha * np.log(np.clip(pi_b, 1e-12, 1.0))
+        # Conservative score: Q plus a KL-to-behavior penalty, expressed in Q's
+        # own units so alpha is comparable across fits. log of the (clipped)
+        # propensity is a large negative for low-support calls.
+        penalty = self.alpha * self.q_scale * np.log(np.clip(pi_b, 1e-12, 1.0))
+        scores = q_all + penalty
 
         # Restrict to supported actions; fall back to unconstrained score if a
         # state has no supported call (shouldn't happen after propensity clip).

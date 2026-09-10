@@ -24,10 +24,11 @@ from __future__ import annotations
 
 import numpy as np
 
+from ..scm.graph import version_tag
 from ..schemas.ope import OPEResult
 
 
-def dr_policy_value(
+def dr_per_play(
     q_all: np.ndarray,
     pi_b: np.ndarray,
     policy_probs: np.ndarray,
@@ -35,11 +36,14 @@ def dr_policy_value(
     rewards: np.ndarray,
     weight_clip: float = 20.0,
     self_normalize: bool = True,
-) -> OPEResult:
-    """Doubly-robust value of a (possibly stochastic) policy.
+) -> np.ndarray:
+    """Per-play DR scores, whose mean is V_DR(pi).
 
-    All array args are aligned by play. q_all / pi_b / policy_probs are
-    (n, n_actions); actions and rewards are length n.
+    Exposed separately from `dr_policy_value` because comparing two policies
+    correctly needs their *per-play* scores, not just their means: both policies
+    are scored on the same holdout rows, so the difference is paired and its
+    standard error is far smaller than treating the two estimates as
+    independent. `src.evaluation.version_compare` relies on this.
     """
     n = len(rewards)
     idx = np.arange(n)
@@ -56,12 +60,34 @@ def dr_policy_value(
     if self_normalize and w.sum() > 0:
         # SNDR: per-play score with weights normalized to mean 1.
         w_norm = w * (n / w.sum())
-        per_play = dm + w_norm * residual
-    else:
-        per_play = dm + w * residual
+        return dm + w_norm * residual
+    return dm + w * residual
+
+
+def dr_policy_value(
+    q_all: np.ndarray,
+    pi_b: np.ndarray,
+    policy_probs: np.ndarray,
+    actions: np.ndarray,
+    rewards: np.ndarray,
+    weight_clip: float = 20.0,
+    self_normalize: bool = True,
+    policy_name: str = "unspecified",
+) -> OPEResult:
+    """Doubly-robust value of a (possibly stochastic) policy.
+
+    All array args are aligned by play. q_all / pi_b / policy_probs are
+    (n, n_actions); actions and rewards are length n.
+    """
+    n = len(rewards)
+    per_play = dr_per_play(q_all, pi_b, policy_probs, actions, rewards,
+                           weight_clip=weight_clip, self_normalize=self_normalize)
 
     return OPEResult(
         value=float(per_play.mean()),
         se=float(per_play.std(ddof=1) / np.sqrt(n)),
         n=n,
+        estimator="DR-SN" if self_normalize else "DR",
+        policy=policy_name,
+        graph_version=version_tag(),
     )

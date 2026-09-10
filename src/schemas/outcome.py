@@ -27,6 +27,16 @@ class QModel:
     n_actions: int
     state_cols: list[str]
 
+    # Typical within-state spread of Q across actions, measured on the training
+    # states at fit time. This is the natural unit for anything that trades off
+    # against Q — notably the conservative policy's pessimism penalty, whose
+    # `alpha` would otherwise mean something different for every fitted model
+    # (and, on real data, was ~13x too small to influence a single argmax).
+    # Lives on the model rather than the policy so that every policy built from
+    # this Q — including the ones the regression gate constructs on the holdout —
+    # shares one scale derived from training data.
+    q_scale: float = 1.0
+
     def predict_all_actions(self, df: pd.DataFrame) -> np.ndarray:
         """Q(s, a) for every action, shape (n, n_actions).
 

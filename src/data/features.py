@@ -13,6 +13,14 @@ Discipline enforced here (CLAUDE.md):
 V2 action space: 6 coverage shells {C0,C1,C2,C3,C4,C6} x pressure {no-blitz,
 blitz} = 12 actions, across ALL downs (V1 was 3rd-down-only, 4 actions).
 
+Scope caveat — the slice is CHARTED DROPBACKS, not every snap. The coverage axis
+comes from nflfastR's `defense_coverage_type`, which is NGS charting on pass
+plays: runs are charted on roughly 3% of snaps, so `drop_uncharted_coverage`
+would silently delete nearly every run anyway. `cfg['data']['play_types']` makes
+that a declared restriction rather than a side effect, and `slice_report`
+quantifies it for the run log. It matters for reading a recommendation: "cover-3
+on 1st and 10" here means *given the offense drops back*, not unconditionally.
+
 The `Dataset` returned bundles the frame with the column metadata every
 downstream model needs, so feature lists are defined once, here.
 """
@@ -54,12 +62,15 @@ def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
     """
     team = cfg["data"]["team"]
     down = cfg["data"].get("down")
+    # Default keeps both play types so the V1 config (which predates this key)
+    # behaves exactly as before.
+    play_types = cfg["data"].get("play_types", ["pass", "run"])
     df = pbp.copy()
 
     # ── 1. Filter to the slice ───────────────────────────────────────────────
     mask = (
         (df["defteam"] == team)
-        & (df["play_type"].isin(["pass", "run"]))
+        & (df["play_type"].isin(play_types))
         & (df["epa"].notna())
         & (df["ydstogo"].notna())
         & (df["down"].notna())
@@ -98,6 +109,40 @@ def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
         n_actions=N_ACTIONS,
         action_labels=dict(ACTION_LABELS),
     )
+
+
+def slice_report(pbp: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """What the slice keeps and drops, by play type — the charting-coverage story.
+
+    The coverage-shell axis of the action space is only defined where nflfastR
+    charted `defense_coverage_type`, and that charting is NGS dropback data. Runs
+    come back charted a few percent of the time, so a bare row count makes the
+    slice look like "all snaps, minus some noise" when it is really "dropbacks".
+    Reporting charted-vs-total per play type puts that in the run log, next to
+    the `play_types` restriction it justifies.
+    """
+    team = cfg["data"]["team"]
+    kept = cfg["data"].get("play_types", ["pass", "run"])
+    df = pbp[
+        (pbp["defteam"] == team)
+        & pbp["epa"].notna() & pbp["ydstogo"].notna() & pbp["down"].notna()
+        & pbp["play_type"].isin(["pass", "run"])
+    ]
+    if "play_type_nfl" in df.columns:
+        df = df[~df["play_type_nfl"].isin(["SPIKE", "KNEEL"])]
+
+    charted = df["defense_coverage_type"].astype("string").str.upper().isin(COVERAGE_SHELLS)
+    rows = [
+        {
+            "play_type": pt,
+            "n_plays": len(grp),
+            "n_charted": int(charted.loc[grp.index].sum()),
+            "pct_charted": float(charted.loc[grp.index].mean()) if len(grp) else 0.0,
+            "in_slice": pt in kept,
+        }
+        for pt, grp in df.groupby("play_type")
+    ]
+    return pd.DataFrame(rows).sort_values("n_plays", ascending=False).reset_index(drop=True)
 
 
 # Backwards-compatible alias — the V1 tag imports `build_v1_dataset`. Kept so a

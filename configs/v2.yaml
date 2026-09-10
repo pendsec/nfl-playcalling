@@ -12,6 +12,12 @@ data:
   team: SF                    # defense under study
   seasons: [2021, 2022, 2023]
   down: all                   # all downs (int to restrict to one down)
+  # Charted dropbacks only. The coverage-shell axis comes from nflfastR's
+  # `defense_coverage_type`, which is NGS charting on pass plays — runs are
+  # charted on ~3% of snaps, so keeping them would add a handful of plays and a
+  # misleading "all snaps" label. Declared here so the restriction is a choice,
+  # not a side effect of drop_uncharted_coverage. See features.slice_report.
+  play_types: [pass]
   holdout_season: 2023        # time-aware split: hold out the last season
   cache_dir: data/raw
   processed_dir: data/processed
@@ -50,7 +56,18 @@ outcome_model:                 # Q(S, A) = E[R | S, do(A)] — per-treatment GBM
   cross_fit_folds: 5           # OOF folds for the DR smoke test on train
 
 policy:                        # conservative (behavior-regularized) policy
-  alpha: 0.05                  # KL-to-behavior conservatism weight
+  # Conservatism weight, in units of the fitted Q model's typical WITHIN-STATE
+  # spread (QModel.q_scale) per nat of log-propensity — so alpha is comparable
+  # across fits instead of silently depending on the reward scale. Read it as
+  # "how much within-state Q advantage a call must show to justify one nat of
+  # departure from the DC".
+  #
+  # Chosen on a support criterion, not on the OPE number: at alpha=1.0 the mean
+  # pi_b of the calls pi* recommends (0.220) exceeds the mean pi_b of the DC's
+  # own calls (0.165), and the share of recommendations resting on pi_b < 0.10
+  # falls from 36% (greedy) to 16%. DR value differences across alpha sit well
+  # inside the holdout's noise, so they are not what sets this.
+  alpha: 1.0
   support_threshold: 0.05      # hard floor: only consider pi_b(a|s) >= this
 
 ope:
@@ -62,6 +79,14 @@ sensitivity:
 
 positivity:
   min_count: 10               # per-(stratum, action) support threshold
+
+evaluation:                    # version-over-version regression gate (Step 8)
+  # V2's conservative policy must not be significantly WORSE than V1's greedy
+  # policy on the held-out season, judged by paired DR. Failing to prove an
+  # improvement is fine; proving a deterioration blocks merge.
+  baseline_name: v1_greedy
+  candidate_name: v2_conservative
+  regression_margin: 0.02      # reward(-EPA)/play tolerated before blocking
 
 seed: 42
 

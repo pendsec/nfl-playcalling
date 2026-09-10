@@ -76,6 +76,45 @@ CONFOUNDER_COLUMNS = {
 }
 
 
+# ── Graph version ────────────────────────────────────────────────────────────
+# Every causal estimate this repo produces is only valid *relative to this DAG*,
+# so each OPE record carries the version below (CLAUDE.md causal discipline:
+# "Every OPE estimate ships with ... the assumed causal graph version").
+#
+# GRAPH_VERSION is the human-facing label — bump it whenever the structural
+# claims change (an edge added/removed, a variable moved between observed,
+# mediator, and unobserved). `fingerprint()` is the machine-facing guard: it
+# hashes the actual structure, so an edit that someone forgets to version-bump
+# still shows up as a different fingerprint on the stored estimate.
+GRAPH_VERSION = "v2.0"
+
+
+def fingerprint() -> str:
+    """Short content hash of the DAG's structural claims.
+
+    Covers the edge list, the observed/unobserved split, the mediator set, and
+    the concrete adjustment columns — i.e. everything that changes what the
+    backdoor adjustment means. Two estimates with the same GRAPH_VERSION but
+    different fingerprints were computed under different graphs.
+    """
+    import hashlib
+
+    payload = "|".join([
+        ";".join(f"{s}->{t}" for s, t in sorted(EDGES)),
+        ";".join(sorted(OBSERVED)),
+        ";".join(sorted(UNOBSERVED)),
+        ";".join(sorted(MEDIATORS)),
+        f"{TREATMENT}->{OUTCOME}",
+        ";".join(adjustment_columns()),
+    ])
+    return hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+
+def version_tag() -> str:
+    """`GRAPH_VERSION+fingerprint` — the string stamped onto every OPE record."""
+    return f"{GRAPH_VERSION}+{fingerprint()}"
+
+
 def adjustment_set() -> set[str]:
     """Abstract confounder nodes to condition on (backdoor set given observed)."""
     return set(OBSERVED_CONFOUNDERS)
@@ -108,7 +147,7 @@ def to_gml() -> str:
 def describe() -> str:
     """Human-readable summary for the run log."""
     return (
-        f"V2 SCM: treatment={TREATMENT}, outcome={OUTCOME}\n"
+        f"V2 SCM [{version_tag()}]: treatment={TREATMENT}, outcome={OUTCOME}\n"
         f"  adjustment set (condition on): {sorted(adjustment_set())}\n"
         f"    -> {len(adjustment_columns())} feature columns\n"
         f"  mediators (do NOT condition on): {sorted(MEDIATORS)}\n"

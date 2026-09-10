@@ -1,9 +1,10 @@
 """`Dataset` — the built (S, A, R) table plus the column metadata models need.
 
-Pure data container. Constructed by `src.data.features.build_v1_dataset`; every
-downstream model reads its `state_cols` / `action_col` / `reward_col` rather than
-hard-coding column names, so feature lists are defined once (in the data layer)
-and flow through the pipeline on this object.
+Pure data container. Constructed by `src.data.features.build_dataset` (which the
+V1-era name `build_v1_dataset` still aliases); every downstream model reads its
+`state_cols` / `action_col` / `reward_col` rather than hard-coding column names,
+so feature lists are defined once (in the data layer) and flow through the
+pipeline on this object.
 """
 
 from __future__ import annotations

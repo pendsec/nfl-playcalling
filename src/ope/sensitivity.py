@@ -25,6 +25,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from ..schemas.ope import OPEResult
+
 
 def _msm_correction_bound(g: np.ndarray, w: np.ndarray, gamma: float, want_max: bool) -> float:
     """Worst-case self-normalized weighted mean of g under weights w*[1/G, G].
@@ -63,6 +65,7 @@ def sensitivity_bounds(
     gamma_range: list[float],
     weight_clip: float = 20.0,
     compare_value: float | None = None,
+    policy_name: str = "unspecified",
 ) -> pd.DataFrame:
     """DR value bounds for a policy over a range of confounding strengths Gamma.
 
@@ -85,8 +88,31 @@ def sensitivity_bounds(
         else:
             lo = dm_mean + _msm_correction_bound(g, w, gamma, want_max=False)
             hi = dm_mean + _msm_correction_bound(g, w, gamma, want_max=True)
-        row = {"gamma": gamma, "v_lower": lo, "v_upper": hi, "width": hi - lo}
+        row = {"policy": policy_name, "gamma": gamma,
+               "v_lower": lo, "v_upper": hi, "width": hi - lo}
         if compare_value is not None:
             row["beats_comparison"] = bool(lo > compare_value)
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def attach(result: OPEResult, sens: pd.DataFrame) -> OPEResult:
+    """Bind a sensitivity table to the OPE estimate it qualifies.
+
+    CLAUDE.md requires every OPE estimate to ship with its sensitivity bound.
+    Keeping them in separate variables invites the two drifting apart — a bound
+    computed for one policy quietly reported next to another's point estimate.
+    Attaching makes the pairing structural: `result.to_record()` then carries
+    `robust_to_gamma` alongside the value and CI.
+
+    Mutates and returns `result` so it reads naturally at the call site.
+    """
+    if "policy" in sens.columns:
+        named = set(sens["policy"].unique())
+        if named != {result.policy}:
+            raise ValueError(
+                f"sensitivity table is for policy {sorted(named)} but the estimate "
+                f"is for {result.policy!r} — refusing to attach a mismatched bound"
+            )
+    result.sensitivity = sens
+    return result
