@@ -1,5 +1,5 @@
 """
-Sensitivity analysis — bounding unobserved confounding (V2 headline "Add").
+Sensitivity analysis — bounding unobserved confounding.
 
 The observed adjustment set leaves residual confounding through `coach_read` (the
 unobserved read). We bound its impact with a Rosenbaum / marginal-sensitivity

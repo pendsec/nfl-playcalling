@@ -1,14 +1,15 @@
 """
-Policy Learning — behavior-constrained greedy (V1).
+Policy Learning — behavior-constrained greedy.
 
 Decision rule:
 
     pi*(s) = argmax_a  Q(s, a)   subject to   pi_b(a | s) >= support_threshold
 
-The behavior constraint is the V1 stand-in for the pessimism/positivity
-discipline that CQL and causal-pessimism formalize later: we refuse to
-recommend a call the DC effectively never makes in this kind of state, because
-the Q-model has no support there and OPE cannot vouch for it.
+The behavior constraint is the simplest form of the pessimism/positivity
+discipline that CQL and causal-pessimism formalize: we refuse to recommend a
+call the DC effectively never makes in this kind of state, because the Q-model
+has no support there and OPE cannot vouch for it. It is kept as the unregularized
+baseline the conservative policy is measured against.
 """
 
 from __future__ import annotations

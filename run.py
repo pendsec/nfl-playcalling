@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-V2 — "Right Tools, Simple Problem" runner.
+Causal-RL defensive playcalling pipeline — end-to-end runner.
 
 End-to-end: load -> features -> split -> SCM identify + positivity ->
 calibrated pi_b -> per-action GBM Q -> DR smoke test -> conservative policy ->
@@ -10,8 +10,6 @@ Usage:
     python run.py                          # uses configs/v2.yaml (real SF data)
     python run.py --config configs/v2.yaml
     python run.py --source synthetic       # known-SCM data, no network
-
-V1 (the walking skeleton) is preserved at git tag `v1` — `git checkout v1`.
 """
 
 from __future__ import annotations
@@ -41,7 +39,7 @@ from src.ope.doubly_robust import dr_policy_value
 from src.ope.aipw import aipw_contrasts
 from src.ope.sensitivity import sensitivity_bounds, attach as attach_sensitivity
 from src.policy.conservative import learn_conservative_policy
-from src.evaluation import compare_v1_to_v2
+from src.evaluation import compare_to_baseline
 
 
 def load_config(path: str) -> dict:
@@ -77,16 +75,20 @@ def main(config_path: str, source_override: str | None) -> None:
             rates = "  ".join(f"{int(r.season)}:{r.ftn_coverage:.0%}"
                               for _, r in cov.iterrows())
             print(f"  FTN charting merged — coverage by season: {rates}")
+            n_unmatched = int(cov["n_plays"].sum() - (cov["n_plays"] * cov["ftn_coverage"]).sum())
+            if n_unmatched:
+                print(f"  {n_unmatched:,} scrimmage plays carry no FTN charting "
+                      f"and are excluded (use_ftn is set)")
     assert_ftn_coverage(pbp, cfg)
 
     for _, row in slice_report(pbp, cfg).iterrows():
         verdict = "in slice" if row["in_slice"] else "EXCLUDED (see data.play_types)"
         print(f"  {row['play_type']:>4}: {row['n_plays']:>5,} plays, "
-              f"{row['n_charted']:>5,} coverage-charted ({row['pct_charted']:.0%})"
+              f"{row['n_usable']:>5,} usable ({row['pct_usable']:.0%})"
               f"  -> {verdict}")
 
     ds = build_dataset(pbp, cfg)
-    print(f"  V2 slice ({cfg['data']['team']}, down={cfg['data']['down']}, "
+    print(f"  slice ({cfg['data']['team']}, down={cfg['data']['down']}, "
           f"{'/'.join(cfg['data'].get('play_types', ['pass', 'run']))}): "
           f"{len(ds.df):,} plays, {ds.n_actions} actions")
     for a, label in ds.action_labels.items():
@@ -125,7 +127,11 @@ def main(config_path: str, source_override: str | None) -> None:
     print(f"  accuracy:  {diag['oof_accuracy']:.3f} "
           f"(majority baseline {diag['majority_baseline']:.3f})   [{src}]")
     print(f"  log loss:  {diag['oof_log_loss']:.3f}")
-    print(f"  calibration ECE: {diag['ece']:.3f}   ESS ratio: {diag['ess_ratio']:.3f}")
+    print(f"  ESS ratio: {diag['ess_ratio']:.3f}")
+    # Calibration as a triple, never ECE alone: a constant base-rate predictor
+    # scores near-zero ECE and is useless, so a proper scoring rule sits beside it.
+    print(f"  calibration: confidence ECE {diag['confidence_ece']:.3f} | "
+          f"classwise ECE {diag['classwise_ece']:.3f} | Brier {diag['brier']:.3f}")
 
     # ── 4. Outcome model Q ───────────────────────────────────────────────────
     _rule("[4/7] Outcome model Q(S,A) — per-action GBM on reward(-EPA)")
@@ -196,9 +202,9 @@ def main(config_path: str, source_override: str | None) -> None:
     contrasts = aipw_contrasts(q_te, pib_te, a_te, r_te, ds.action_labels,
                                baseline=0, weight_clip=weight_clip)
 
-    # ── 7. Version-over-version regression gate ──────────────────────────────
-    _rule("[7/7] Regression gate — V2 policy vs V1 policy on the holdout season")
-    cmp = compare_v1_to_v2(test, q, beh, cfg)
+    # ── 7. Policy regression gate ────────────────────────────────────────────
+    _rule("[7/7] Regression gate — candidate policy vs baseline on the holdout season")
+    cmp = compare_to_baseline(test, q, beh, cfg)
     print(cmp.report())
 
     _example_recommendations(ds, test, policy)

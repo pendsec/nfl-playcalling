@@ -1,10 +1,10 @@
 """Policies pi*(A | S).
 
 `GreedyPolicy` — behavior-constrained argmax_a Q(s, a) over calls with adequate
-support (pi_b(a|s) >= threshold). Kept as V1's baseline: the policy the V2
+support (pi_b(a|s) >= threshold). Kept as the unregularized baseline that the
 conservative policy is compared against via DR-OPE.
 
-`ConservativePolicy` — the V2 policy. In this single-step contextual-bandit
+`ConservativePolicy` — the shipped policy. In this single-step contextual-bandit
 setting, CQL/IQL reduce to a behavior-regularized (KL-to-pi_b) argmax:
 
     pi*(s) = argmax_a  [ Q(s, a) + alpha * q_scale * log pi_b(a | s) ]
@@ -14,7 +14,7 @@ The penalty term is the conservatism/pessimism penalty: low-support actions
 carry a large negative log-propensity, so the policy is pulled toward calls the
 DC actually makes unless Q is confidently higher. alpha -> 0 recovers greedy;
 alpha -> inf recovers the behavior mode. Full *sequential* CQL/IQL (bootstrapped
-targets, expectile value) only becomes meaningful in V3+ once drive-level
+targets, expectile value) only becomes meaningful once drive-level
 transitions enter — here there is a single step, so no bootstrap.
 
 `q_scale` is what makes alpha portable. Q is measured in reward(-EPA) units whose

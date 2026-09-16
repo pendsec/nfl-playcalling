@@ -1,7 +1,7 @@
 """
-Off-Policy Evaluation — Doubly-Robust policy value (V2).
+Off-Policy Evaluation — Doubly-Robust policy value.
 
-The DR estimator combines the Direct Method (V1's plug-in Q) with an
+The DR estimator combines the Direct Method's plug-in Q with an
 importance-weighted correction on the taken action:
 
     V_DR(pi) = (1/n) Σ_i Σ_a pi(a|s_i) q(s_i,a)          <- direct method term
@@ -9,9 +9,9 @@ importance-weighted correction on the taken action:
       with   w_i = pi(a_i|s_i) / pi_b(a_i|s_i)  (clipped).
 
 Doubly robust: consistent if EITHER q OR pi_b is correct. The correction is what
-fixes V1's Direct-Method pathology — when q extrapolates badly off-support, the
-residual (r - q) on logged plays pulls the estimate back toward reality instead
-of trusting a Q-value no data supports.
+contains the Direct Method's failure mode — when q extrapolates badly
+off-support, the residual (r - q) on logged plays pulls the estimate back toward
+reality instead of trusting a Q-value no data supports.
 
 Two variance controls:
   * weight clipping (switch-DR flavor): cap w_i so a single tiny propensity can't

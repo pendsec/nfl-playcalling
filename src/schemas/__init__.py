@@ -6,7 +6,8 @@ collected in one place so the shapes of the data are easy to find and read.
     BehaviorModel  a fitted behavior policy pi_b(A|S)            (Step 3)
     QModel         a fitted outcome / Q-model Q(S, A)            (Step 4)
     OPEResult      one off-policy-evaluation estimate + 95% CI   (Step 5)
-    GreedyPolicy   the behavior-constrained greedy policy pi*    (Step 6)
+    GreedyPolicy   the behavior-constrained greedy baseline       (Step 6)
+    ConservativePolicy  the shipped behavior-regularized policy   (Step 6)
 
 Only the *shapes* live here. The operations that build them (build_dataset,
 fit_behavior_model, fit_q_model, dr_policy_value, learn_conservative_policy, ...)

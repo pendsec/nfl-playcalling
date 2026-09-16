@@ -5,13 +5,13 @@ defensive-playcall recommendation agent using causal reinforcement learning.
 
 See [CLAUDE.md](CLAUDE.md) for the full project design and phased build plan.
 
-## V2 — Right Tools, Simple Problem (current)
+## The pipeline
 
 An end-to-end causal-RL pipeline that produces and **credibly evaluates** a
-defensive policy. V2 keeps the problem small (one team) but replaces V1's
-deliberately-wrong skeleton parts with the right tools: calibrated propensities,
-a doubly-robust off-policy evaluator, a conservative policy, and a sensitivity
-analysis that bounds unobserved confounding.
+defensive policy. The problem is kept deliberately small — one team — so that
+every component can be checked: calibrated propensities, a doubly-robust
+off-policy evaluator, a conservative policy, and a sensitivity analysis that
+bounds unobserved confounding.
 
 **Scope:** all downs · one team's defense (SF) · 2022–2024 · **charted
 dropbacks** · **12 actions** = 6 coverage shells {C0, C1, C2, C3, C4, C6} ×
@@ -25,7 +25,7 @@ see [What the estimand actually is](#what-the-estimand-actually-is) below.
 
 **Pipeline:**
 
-| Step | Component | V2 model |
+| Step | Component | Model |
 |------|-----------|----------|
 | Data | `src/data/` | nflfastR + FTN loaders and synthetic-SCM generator; 12-action (S, A, R) builder, leak-free confounders + player proxies |
 | SCM | `src/scm/` | hand-built DAG (`graph.py`) with declared mediator + selection nodes, content-fingerprinted; DoWhy backdoor identification & positivity check (`identify.py`) |
@@ -33,7 +33,17 @@ see [What the estimand actually is](#what-the-estimand-actually-is) below.
 | Q | `src/models/outcome/` | per-treatment GBM on reward(−EPA), SCM-selected features, out-of-fold path for honest DR |
 | OPE | `src/ope/` | **doubly-robust** policy value (self-normalized, switch-clipped) + DR recovery smoke test; AIPW contrasts (same clipping, reported with support counts); Rosenbaum sensitivity |
 | Policy | `src/policy/` | conservative behavior-regularized (CQL/IQL-style) policy |
-| Eval | `src/evaluation/` | version-over-version regression gate: paired DR comparison of the V1 vs V2 policy on the held-out season |
+| Eval | `src/evaluation/` | policy regression gate: paired DR comparison of the candidate against the baseline policy on the held-out season |
+
+**Built but not wired in:** `src/models/imputation/` treats the coverage shell as
+a *latent* treatment label — charted on ~94% of dropbacks but ~3% of runs — and
+imputes it from a calibrated pre-snap posterior, sampling `m` draws and pooling
+them with Rubin's rules so the interval reflects what the imputation does not
+know. It has no entry point in `run.py`, the notebook, or `configs/`: it is
+groundwork for the factored action space, and running it changes the estimand.
+Read `RubinResult.fraction_missing_information` before trusting anything built
+on it — on this data roughly **43%** of the pooled variance comes from not
+knowing the label, and two independent draws agree on only ~32% of plays.
 
 ### Install
 
@@ -57,18 +67,19 @@ positivity heatmap, calibration curve, DR recovery, and the sensitivity band),
 open [`notebooks/v2_pipeline_walkthrough.ipynb`](notebooks/v2_pipeline_walkthrough.ipynb).
 It runs the story on real SF data with a synthetic ground-truth validation aside.
 
-All V2 scope lives in [`configs/v2.yaml`](configs/v2.yaml) (team, seasons,
+All scope lives in [`configs/v2.yaml`](configs/v2.yaml) (team, seasons,
 action taxonomy, model hyperparameters, sensitivity γ range).
 
-### What V2 fixes vs V1
+### Design decisions, and the failure each one prevents
 
-- **Off-support blow-up → doubly-robust OPE.** V1's ridge-Q Direct Method
-  extrapolated to implausible off-distribution values, so greedy lift looked
-  absurd (+1.x EPA/play). DR's IPW correction on logged plays pulls estimates
-  back to reality; the DR recovery smoke test gates every candidate policy.
-- **Uncalibrated propensities → calibrated LightGBM.** Isotonic calibration with
-  calibration error tracked, since miscalibrated propensities silently break
-  inverse-weighting.
+- **Doubly-robust OPE, not the Direct Method.** A plug-in Q model asked to score
+  actions it has no support for extrapolates to implausible values, and a greedy
+  policy chasing them reports absurd lift (+1.x EPA/play is achievable this way,
+  and meaningless). DR's importance-weighted correction on logged plays anchors
+  the estimate to observed reality, and the DR recovery smoke test gates every
+  candidate policy before it is believed.
+- **Calibrated propensities.** Isotonic calibration with calibration error
+  tracked, since miscalibrated propensities silently break inverse-weighting.
 
   Calibration metrics live in `src/models/calibration.py` and are reported as a
   triple: **confidence ECE** (is the top-class confidence right?), **classwise
@@ -78,20 +89,20 @@ action taxonomy, model hyperparameters, sensitivity γ range).
   constant base-rate predictor, so on its own it cannot separate "well
   calibrated" from "uninformative but well calibrated".
 
-  *Correction:* versions before this reported an ECE that binned by the
-  predicted probability of the **true** class while scoring whether the
-  **argmax** was correct. Those are different quantities, and the metric reads
-  ~0.25 on probabilities that are perfectly calibrated by construction. πb's
-  calibration error was reported as 0.238; measured properly it is **0.022**.
-  The model was fine, the ruler was not — and calibration numbers from earlier
-  runs are not comparable to current ones.
-- **Unaddressed confounding → sensitivity analysis.** A Rosenbaum / marginal-
+  A note on the metric, since the obvious implementation is wrong: binning by
+  the predicted probability of the **true** class while scoring whether the
+  **argmax** was correct mixes two different quantities, and reads ~0.25 on
+  probabilities that are perfectly calibrated by construction. The definitions
+  in `calibration.py` read ~0 on such input, which is what makes πb's measured
+  0.022 meaningful.
+- **Sensitivity analysis on every headline number.** A Rosenbaum / marginal-
   sensitivity-model bound reports whether the estimated lift survives an
   unobserved confounder of odds-ratio Γ (validated against the synthetic SCM's
   known confounding).
-- **Naive greedy → conservative policy.** A behavior-regularized argmax that
-  only departs from the DC when Q is confidently higher and the call is
-  well-supported.
+- **A conservative policy rather than a naive greedy one.** A behavior-regularized
+  argmax that departs from the DC only when Q is confidently higher and the call
+  is well-supported. The unregularized greedy policy is kept as the baseline the
+  regression gate measures against.
 
 ### Causal bookkeeping
 
@@ -109,7 +120,7 @@ convention:
   the Γ up to which the conclusion survives.
 
 - **Version regressions block merge.** `src/evaluation/version_compare.py`
-  scores V1's greedy policy and V2's conservative policy by DR on the *same*
+  scores the greedy baseline and the conservative candidate by DR on the *same*
   held-out plays, so the difference is **paired** — the shared Q/πb noise
   cancels instead of adding, which matters because each policy's own CI is far
   wider than the gap between them. The gate blocks only on a *significant
@@ -134,7 +145,7 @@ an ideal confounder — but it is part of the defense's own decision, a *sibling
 of the treatment rather than a cause of it, so adjusting for it would block a
 slice of the effect being estimated. It is carried because it is the only
 defensive attribute charted on ~99% of **all** snaps (runs included, where
-coverage is charted on ~3%), which makes it the primary axis of V3's factored
+coverage is charted on ~3%), which makes it the primary axis of the planned factored
 action space. The DAG declares it as `def_front`
 (`scm.graph.DEFENSIVE_CHOICE`), and `assert_adjustment_consistency` raises if it
 — or any post-snap flag — turns up among the state features.
@@ -145,7 +156,7 @@ Two guards keep this from degrading quietly:
   FTN does not cover. Without it, a 2021–2023 window would default every 2021
   row, and the model would learn "no motion" as a property of *2021* rather than
   of the play — a feature confounded with season across half of training. The
-  V2 window moved to 2022–2024 rather than letting that happen.
+  season window is 2022–2024 rather than letting that happen.
 - **Zero-sentinel scrubbing.** FTN writes `0` / `"0"` into `n_defense_box` and
   `qb_location` where it charts nothing (kickoffs, punts, timeouts, and ~0.2% of
   scrimmage plays). Zero defenders in the box is not an alignment, so the
@@ -153,7 +164,7 @@ Two guards keep this from degrading quietly:
 
 ### What the estimand actually is
 
-V2 estimates **the effect of a coverage call on EPA, given a charted dropback** —
+This pipeline estimates **the effect of a coverage call on EPA, given a charted dropback** —
 not the unconditional effect of the call. That restriction is forced by the data
 and is now encoded in the DAG (`scm.graph.SELECTION`) rather than left in prose,
 so it is hashed into the graph fingerprint every estimate carries.
@@ -161,7 +172,7 @@ so it is hashed into the graph fingerprint every estimate carries.
 Why it is forced: the coverage axis comes from nflfastR's
 `defense_coverage_type`, which is NGS charting on dropbacks. Runs carry a shell
 label on **3.0%** of snaps (43 of 1,411), and only in 2023 — 2021 and 2022 are
-at 0.0%. Coarsening to V1's man/zone axis does not rescue them: after discarding
+at 0.0%. Coarsening to a man/zone axis does not rescue them: after discarding
 empty-string placeholders, runs carry a man/zone label on the same 3.0%. There
 is no cheaper action axis hiding in the run plays.
 
@@ -191,9 +202,9 @@ Two consequences, both real:
 
 The fix for both is denser charting (PFF) or a treatment definition observable
 on every snap — `defenders_in_box` is charted on ~98% of runs and passes alike,
-which is what makes a box-count action axis a live V3 option.
+which is what makes a box-count action axis the natural next step.
 
-### Known V2 characteristics (honest limitations)
+### Known characteristics (honest limitations)
 
 - **Sparse action space for one team.** 12 actions over ~1,300 charted training
   plays leaves several (coverage × blitz) cells with a handful — or a single —
@@ -203,7 +214,7 @@ which is what makes a box-count action axis a live V3 option.
   rather than quietly disabling them. Holdout policy-value CIs are
   correspondingly wide, and the sensitivity analysis typically rates the lift
   *not robust* to even mild confounding — the appropriately-humble answer this
-  data supports. Denser labels (PFF charting) or multi-team pooling (V3) are
+  data supports. Denser labels (PFF charting) or multi-team pooling are
   the fixes.
 
 - **πb is only slightly better than guessing the modal call.** Cross-fitted
@@ -212,14 +223,14 @@ which is what makes a box-count action axis a live V3 option.
   in-sample the same model reports ~0.98 accuracy and a 0.93 ESS ratio; both are
   memorisation. The out-of-fold numbers are the ones that bound how far π\* may
   move, so they are the ones reported.
-- **V2's policy does not measurably beat V1's on the holdout.** The regression
-  gate reports *no change detected*: the conservative policy scores slightly
-  above the V1 greedy policy, with a paired-difference CI comfortably straddling
+- **The conservative policy does not measurably beat the greedy baseline.** The
+  regression gate reports *no change detected*: the conservative policy scores
+  slightly above the baseline, with a paired-difference CI comfortably straddling
   zero. On ~700 holdout plays the data cannot resolve the difference either way,
   and the width is honest — the two policies now make genuinely different calls,
   where a near-identical pair would have produced a precise-looking interval
-  around nothing. V2's contribution is that the estimate is *credible*, not that
-  the number is higher.
+  around nothing. The contribution here is that the estimate is *credible*, not
+  that the number is higher.
 
 - **Conservatism is a scaled knob, not a magic constant.** The pessimism penalty
   is expressed in units of the fitted Q model's typical within-state spread
@@ -229,26 +240,17 @@ which is what makes a box-count action axis a live V3 option.
   own calls (0.165), and recommendations resting on πb < 0.10 fall from 36%
   (greedy) to 16% — not from the OPE number, which varies well inside noise
   across the range.
-- **No standalone IPW estimator.** V2 ships DM and DR; the pure-IPW rung of the
-  DM → IPW → DR ladder is deferred to V3, where multi-team pooling makes it
-  informative. At V2's ESS ratio a pure-IPW estimate would be dominated by a
+- **No standalone IPW estimator.** The pipeline ships DM and DR; the pure-IPW
+  rung of the DM → IPW → DR ladder is deferred until multi-team pooling makes it
+  informative. At this ESS ratio a pure-IPW estimate would be dominated by a
   few tiny propensities and would add variance without changing a decision.
 - **The DAG is a hand-built hypothesis, not a discovered graph.** It is
-  versioned (`GRAPH_VERSION`) and content-fingerprinted, so an estimate can
-  never drift from the structure that produced it — `v2.1` added the
-  `def_playcall → off_playcall` mediator edge and the `coverage_charted`
-  selection node, and every estimate stamped `v2.0` was computed under different
-  structural claims. What that machinery does *not* do is tell you the graph is
+  versioned (`GRAPH_VERSION`) and content-fingerprinted, so an estimate can never
+  drift from the structure that produced it: edit an edge, move a variable
+  between observed/mediator/selection, and the fingerprint on every stored
+  estimate changes even if nobody remembered to bump the label. What that
+  machinery does *not* do is tell you the graph is
   right; the conditional-independence tests that would challenge it are thin at
   this sample size.
 
-- **econml CATE / explainability** is deferred to V3, per the phased plan.
-
-## V1 — Walking Skeleton (archived)
-
-V1 (3rd downs only, 4 actions, logistic πb, ridge Q, Direct-Method OPE, greedy
-policy) is preserved at git tag **`v1`**:
-
-```bash
-git checkout v1        # original skeleton + notebooks/v1_pipeline_walkthrough.ipynb
-```
+- **econml CATE / explainability** is deferred, per the phased plan in CLAUDE.md.

@@ -1,5 +1,5 @@
 """
-Shell-imputation regression tests (V3).
+Shell-imputation regression tests.
 
 Per CLAUDE.md's validation discipline: simulate from a known SCM, run the
 machinery, check what comes back against the truth. Here the "truth" is the
@@ -19,24 +19,20 @@ import os
 import sys
 
 import numpy as np
-import pandas as pd
 import pytest
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from _config import CFG
 
 from src.data.load import generate_synthetic, N_SHELLS
 from src.data.features import build_dataset
-from src.models.imputation import (ShellImputer, add_team_shell_tendency,
+from src.models.imputation import (add_team_shell_tendency,
                                    assert_imputer_features, build_imputation_frame,
                                    fit_shell_imputer, imputer_features, pool_rubin,
                                    tendency_columns)
 
-CFG = {
-    "data": {"team": "SYN", "down": "all", "holdout_season": 2023},
-    "action": {"blitz_rusher_threshold": 5, "drop_uncharted_coverage": True},
-    "reward": {"negate_epa": True},
-    "seed": 42,
-}
 NUM = ["down", "ydstogo", "yardline_100", "score_diff", "qtr",
        "n_defense_box", "is_motion", "n_offense_backfield"]
 CAT = ["formation", "qb_location"]

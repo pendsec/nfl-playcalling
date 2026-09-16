@@ -1,8 +1,8 @@
 """
 Behavior Policy Model — pi_b(A | S).
 
-V2: a calibrated gradient-boosted classifier predicting which of the 12
-defensive calls the actual DC made in state S. This is the engine of IPW/DR:
+A calibrated gradient-boosted classifier predicting which of the 12 defensive
+calls the actual DC made in state S. This is the engine of IPW/DR:
 its propensities reweight plays, so **calibration is critical** —
 miscalibrated propensities silently break inverse-weighting.
 
@@ -184,7 +184,6 @@ def _diagnose(ds: Dataset, cfg: dict, model: BehaviorModel, calibrated: bool) ->
         # inverted into importance weights, which use every column rather than
         # just the argmax.
         **calibration_report(y_c, p_c),
-        "ece": calibration_report(y_c, p_c)["confidence_ece"],  # back-compat key
         "ess_ratio": float(_ess_ratio(p_c, y_c)),
         "n_splits": n_splits,
         "calibrated": calibrated,

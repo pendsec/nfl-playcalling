@@ -1,11 +1,13 @@
 """
 Outcome / Q-Model — Q(S, A) = E[R | S, do(A)].
 
-V2: a per-treatment gradient-boosted outcome model — one LightGBM regressor of
+A per-treatment gradient-boosted outcome model — one LightGBM regressor of
 reward on the SCM adjustment set, fit on the plays where each action was taken.
 Nonlinear and state-dependent, so recommendations vary by situation, while rare
-action cells fall back to a mean rather than extrapolating (V1's ridge blew up
-off-support — the pathology DR-OPE + the conservative policy now contain).
+action cells fall back to a shrunk mean rather than extrapolating. That fallback
+matters: a regularized linear model asked to extrapolate off-support produces
+implausible Q-values, which is the failure DR-OPE and the conservative policy
+exist to contain.
 
 Causal discipline (per the SCM): condition ONLY on the adjustment columns
 `scm.graph.adjustment_columns()` — pre-snap confounders + player proxies. The

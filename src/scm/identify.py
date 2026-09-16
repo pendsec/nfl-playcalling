@@ -189,7 +189,7 @@ def visualize_dag(save_path: str) -> None:
         node_size=2600, font_size=8, font_color="white", font_weight="bold",
         edge_color="#555555", arrows=True, arrowsize=16,
     )
-    ax.set_title("Defensive Playcall — Causal DAG (V2)", fontweight="bold")
+    ax.set_title("Defensive Playcall — Causal DAG", fontweight="bold")
     ax.axis("off")
     fig.tight_layout()
     fig.savefig(save_path, dpi=150, bbox_inches="tight")

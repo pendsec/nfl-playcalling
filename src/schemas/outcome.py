@@ -1,7 +1,7 @@
 """`QModel` — a fitted outcome / Q-model, Q(S, A) = E[R | S, do(A)].
 
-V2: one gradient-boosted regressor per action level (per-treatment outcome
-model), sharing a fitted preprocessor. Evaluates Q for the taken action or,
+One gradient-boosted regressor per action level (a per-treatment outcome model),
+sharing a fitted preprocessor. Evaluates Q for the taken action or,
 counterfactually, for every action in each state.
 
 Causal note: conditions only on the SCM adjustment set (pre-snap confounders +

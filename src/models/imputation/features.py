@@ -30,7 +30,7 @@ for that label (you cannot play a two-high shell with eight in the box).
 
 Different role, different rule — but the consequence travels: the imputed shell
 and the box count are correlated by construction, which matters once both become
-axes of the V3 factored action space.
+axes of the factored action space.
 
 Known limitation carried by these features
 ------------------------------------------

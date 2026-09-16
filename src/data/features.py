@@ -10,8 +10,8 @@ Discipline enforced here (CLAUDE.md):
     than guessed (treated as latent).
   * Reward R = -EPA (defense minimizes offensive EPA).
 
-V2 action space: 6 coverage shells {C0,C1,C2,C3,C4,C6} x pressure {no-blitz,
-blitz} = 12 actions, across ALL downs (V1 was 3rd-down-only, 4 actions).
+Action space: 6 coverage shells {C0,C1,C2,C3,C4,C6} x pressure {no-blitz, blitz}
+= 12 actions, across all downs.
 
 Scope caveat — the slice is CHARTED DROPBACKS, not every snap. The coverage axis
 comes from nflfastR's `defense_coverage_type`, which is NGS charting on pass
@@ -63,7 +63,7 @@ CATEGORICAL_STATE = ["formation", "qb_location"]
 #     treatment rather than a cause of it. Adjusting for part of the defense's
 #     own decision would block the effect being estimated. Carried because it is
 #     the only defensive attribute charted on ~99% of snaps (runs included), and
-#     therefore the primary axis of the V3 factored action space.
+#     therefore the primary axis of the factored action space.
 #   is_play_action / is_rpo / is_screen_pass — post-snap reveals. Carried so the
 #     mediator structure can be studied, and so the leak guard in
 #     `scm.identify.assert_adjustment_consistency` has real columns to reject.
@@ -73,15 +73,15 @@ CARRIED_COLUMNS = list(FTN_PRESNAP_DEFENSE) + list(FTN_POSTSNAP)
 
 
 def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
-    """Turn raw play-by-play into the V2 (S, A, R) table for one team.
+    """Turn raw play-by-play into the (S, A, R) table for one team.
 
     Set `cfg['data']['down']` to an int to restrict to one down, or to "all"
-    / None for every down (the V2 default).
+    / None for every down (the default).
     """
     team = cfg["data"]["team"]
     down = cfg["data"].get("down")
-    # Default keeps both play types so the V1 config (which predates this key)
-    # behaves exactly as before.
+    # Default keeps both play types so a config that omits this key behaves as
+    # it did before the key existed.
     play_types = cfg["data"].get("play_types", ["pass", "run"])
     df = pbp.copy()
 
@@ -95,6 +95,14 @@ def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
     )
     if down not in (None, "all"):
         mask &= df["down"] == down
+    if cfg["data"].get("use_ftn", False):
+        # Declaring use_ftn means the model conditions on FTN-charted features,
+        # so a play FTN never charted has none to condition on. Defaulting them
+        # would invent a value (`is_motion = 0` reading as "no motion" rather
+        # than "unknown") — the same silent-degradation `assert_ftn_coverage`
+        # exists to prevent, just scattered instead of systematic. Small: ~0.3%
+        # of the slice, but not a random 0.3% (their mean reward differs).
+        mask &= df[FTN_PRESNAP_DEFENSE[0]].notna()
     if "play_type_nfl" in df.columns:
         mask &= ~df["play_type_nfl"].isin(["SPIKE", "KNEEL"])
     df = df[mask].copy()
@@ -132,6 +140,10 @@ def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
 def slice_report(pbp: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """What the slice keeps and drops, by play type — the charting-coverage story.
 
+    `n_usable` counts plays that survive EVERY filter the dataset builder applies
+    (coverage charted, and FTN charted when `use_ftn` is set), so it matches the
+    final slice size rather than approximating it.
+
     The coverage-shell axis of the action space is only defined where nflfastR
     charted `defense_coverage_type`, and that charting is NGS dropback data. Runs
     come back charted a few percent of the time, so a bare row count makes the
@@ -149,23 +161,23 @@ def slice_report(pbp: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     if "play_type_nfl" in df.columns:
         df = df[~df["play_type_nfl"].isin(["SPIKE", "KNEEL"])]
 
-    charted = df["defense_coverage_type"].astype("string").str.upper().isin(COVERAGE_SHELLS)
+    usable = df["defense_coverage_type"].astype("string").str.upper().isin(COVERAGE_SHELLS)
+    # Mirror every filter `build_dataset` applies, so the reported count is the
+    # count that actually reaches the models. A report that says "1,907 charted"
+    # beside a 1,902-play slice sends the reader hunting for the difference.
+    if cfg["data"].get("use_ftn", False) and FTN_PRESNAP_DEFENSE[0] in df.columns:
+        usable &= df[FTN_PRESNAP_DEFENSE[0]].notna()
     rows = [
         {
             "play_type": pt,
             "n_plays": len(grp),
-            "n_charted": int(charted.loc[grp.index].sum()),
-            "pct_charted": float(charted.loc[grp.index].mean()) if len(grp) else 0.0,
+            "n_usable": int(usable.loc[grp.index].sum()),
+            "pct_usable": float(usable.loc[grp.index].mean()) if len(grp) else 0.0,
             "in_slice": pt in kept,
         }
         for pt, grp in df.groupby("play_type")
     ]
     return pd.DataFrame(rows).sort_values("n_plays", ascending=False).reset_index(drop=True)
-
-
-# Backwards-compatible alias — the V1 tag imports `build_v1_dataset`. Kept so a
-# `git checkout v1` codepath name still resolves if ever cross-imported.
-build_v1_dataset = build_dataset
 
 
 def _label_actions(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
@@ -233,11 +245,11 @@ def _build_state(df: pd.DataFrame) -> pd.DataFrame:
 def _build_ftn_state(df: pd.DataFrame) -> pd.DataFrame:
     """FTN-charted pre-snap features, plus the carried non-state columns.
 
-    Defaults here are deliberate rather than convenient: FTN does not cover
-    seasons before 2022, and `build_dataset` drops rows with missing numeric
-    state, so an un-defaulted column would silently delete every pre-FTN season
-    instead of reporting the gap. `assert_ftn_coverage` is what turns that gap
-    into an error when it matters.
+Defaults here apply only when FTN is switched OFF. With `use_ftn` set,
+    `build_dataset` has already dropped rows FTN never charted, so nothing
+    reaches these defaults; without it, they keep the columns present and
+    constant so a pre-FTN configuration still builds. `assert_ftn_coverage`
+    turns a systematically-missing season into an error either way.
     """
     if "is_motion" in df.columns:
         df["is_motion"] = df["is_motion"].astype("boolean").fillna(False).astype(int)

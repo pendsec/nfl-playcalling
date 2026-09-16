@@ -8,7 +8,7 @@ Two sources, same downstream schema:
                 are known, the synthetic path is how we validate that the
                 OPE / policy machinery recovers the right answer.
 
-Only the columns the V2 feature builder needs are guaranteed here.
+Only the columns the feature builder needs are guaranteed here.
 """
 
 from __future__ import annotations
@@ -17,11 +17,11 @@ import os
 import numpy as np
 import pandas as pd
 
-# Columns the V2 feature builder consumes. Pulling a subset keeps the cache
+# Columns the feature builder consumes. Pulling a subset keeps the cache
 # small and makes the pre-snap/post-snap boundary explicit.
 #
-# NOTE (V2): `defense_coverage_type` is new vs V1 — it drives the 6-shell
-# coverage axis. Caches built under V1 lack it; bump CACHE_VERSION to force a
+# NOTE: `defense_coverage_type` drives the 6-shell coverage axis. A cache built
+# before this column was requested lacks it, so bump CACHE_VERSION to force a
 # re-pull rather than silently reading a stale, column-short parquet.
 PBP_COLUMNS = [
     "game_id", "play_id", "season", "week", "defteam", "posteam",
@@ -54,7 +54,7 @@ FTN_FIRST_SEASON = 2022
 FTN_PRESNAP_OFFENSE = ["is_motion", "n_offense_backfield", "qb_location"]
 
 # Pre-snap, but a DEFENSIVE CHOICE — a sibling of the treatment, not a cause of
-# it. Carried through for the V3 factored action space; never a state feature,
+# it. Carried through for the factored action space; never a state feature,
 # because adjusting for part of the defense's own decision would block the very
 # effect being estimated. See scm.graph.DEF_FRONT.
 FTN_PRESNAP_DEFENSE = ["n_defense_box"]
@@ -70,11 +70,11 @@ FTN_JOIN_KEYS = ["nflverse_game_id", "nflverse_play_id"]
 # punts, timeouts) rather than leaving them null. A handful of scrimmage rows
 # carry it too. Zero defenders in the box is not a real alignment, so the
 # sentinel is scrubbed to NaN instead of being read as a count.
-FTN_ZERO_IS_MISSING = ["n_defense_box", "qb_location", "starting_hash"]
+FTN_ZERO_IS_MISSING = ["n_defense_box", "qb_location"]
 
 FTN_CACHE_VERSION = "v1"
 
-# The six canonical coverage shells the V2 action space factors over. Order is
+# The six canonical coverage shells the action space factors over. Order is
 # roughly increasing zone depth (man/press -> deep zone), which the synthetic
 # SCM and the "ideal shell rises with distance" story both rely on.
 COVERAGE_SHELLS = ["COVER_0", "COVER_1", "COVER_2", "COVER_3", "COVER_4", "COVER_6"]
@@ -147,9 +147,20 @@ def merge_ftn(pbp: pd.DataFrame, ftn: pd.DataFrame) -> pd.DataFrame:
             out[c] = np.nan
         return out
 
-    ftn = ftn.drop_duplicates(subset=FTN_JOIN_KEYS)
-    out = pbp.merge(ftn, how="left",
-                    left_on=["game_id", "play_id"], right_on=FTN_JOIN_KEYS)
+    # Normalize both sides of the key before joining. nflfastR stores play_id as
+    # a float and FTN as an int; pandas coerces them, but a silent type mismatch
+    # produces an all-NaN merge rather than an error, so the cast is explicit.
+    # Int64 (nullable) rather than int64 so a missing play_id cannot raise.
+    ftn = ftn.drop_duplicates(subset=FTN_JOIN_KEYS).copy()
+    pbp = pbp.copy()
+    pbp["_key_game"] = pbp["game_id"].astype(str)
+    pbp["_key_play"] = pd.to_numeric(pbp["play_id"], errors="coerce").astype("Int64")
+    ftn["_key_game"] = ftn[FTN_JOIN_KEYS[0]].astype(str)
+    ftn["_key_play"] = pd.to_numeric(ftn[FTN_JOIN_KEYS[1]], errors="coerce").astype("Int64")
+
+    out = pbp.merge(ftn.drop(columns=FTN_JOIN_KEYS), how="left",
+                    on=["_key_game", "_key_play"])
+    out = out.drop(columns=["_key_game", "_key_play"])
     for c in FTN_ZERO_IS_MISSING:
         if c in out.columns:
             out[c] = out[c].replace({0: np.nan, "0": np.nan})

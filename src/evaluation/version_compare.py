@@ -1,11 +1,11 @@
 """
-Version-over-version policy comparison — the regression gate (Step 8).
+Policy-versus-baseline comparison — the regression gate (Step 8).
 
 CLAUDE.md's modeling discipline: *"Every new model version evaluated against the
 previous via OPE on a held-out season. Regressions block merge."* This module is
-that gate. V2's conservative policy has to earn its place against V1's
-behavior-constrained greedy policy on the held-out season, judged by the same
-doubly-robust estimator that judges everything else.
+that gate. A candidate policy has to earn its place against the incumbent
+baseline on the held-out season, judged by the same doubly-robust estimator that
+judges everything else.
 
 Two things make the comparison honest:
 
@@ -22,8 +22,8 @@ Two things make the comparison honest:
     score lower. That fails on genuine regressions without blocking on noise.
 
 The gate is deliberately asymmetric: failing to prove an *improvement* is fine
-and expected on this data (V2's honest finding is a wide, confounding-sensitive
-band). Proving a *deterioration* is what blocks.
+and expected on this data, where the honest finding is a wide,
+confounding-sensitive band. Proving a *deterioration* is what blocks.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from ..ope.doubly_robust import dr_per_play, dr_policy_value
 
 @dataclass
 class VersionComparison:
-    """Result of scoring a candidate policy against the previous version's."""
+    """Result of scoring a candidate policy against the incumbent baseline."""
     baseline_name: str
     candidate_name: str
     baseline: OPEResult
@@ -120,8 +120,8 @@ def compare_policies(
     candidate_probs: np.ndarray,
     weight_clip: float = 20.0,
     margin: float = 0.02,
-    baseline_name: str = "v1_greedy",
-    candidate_name: str = "v2_conservative",
+    baseline_name: str = "greedy_baseline",
+    candidate_name: str = "conservative_candidate",
 ) -> VersionComparison:
     """Score two policies by DR on the same holdout rows and gate on the diff.
 
@@ -163,34 +163,34 @@ def compare_policies(
     )
 
 
-def compare_v1_to_v2(
+def compare_to_baseline(
     test: Dataset,
     q: QModel,
     beh: BehaviorModel,
     cfg: dict,
 ) -> VersionComparison:
-    """The concrete V1 -> V2 gate: greedy (V1) vs conservative (V2) on holdout.
+    """The concrete gate: behavior-constrained greedy vs conservative on holdout.
 
-    Both policies are built from the *same* V2 models — the comparison isolates
-    the decision rule, which is the thing V2 changed. Comparing against a
-    separately-refit V1 stack would confound the policy change with the model
-    change and tell us nothing about either.
+    Both policies are built from the *same* fitted Q and pi_b, so the comparison
+    isolates the decision rule — the thing that actually differs between them.
+    Rebuilding the baseline from a separately-refit model stack would confound
+    the policy change with the model change and tell us nothing about either.
     """
     from ..policy.greedy import learn_greedy_policy
     from ..policy.conservative import learn_conservative_policy
 
-    v1 = learn_greedy_policy(test, q, beh, cfg)
-    v2 = learn_conservative_policy(test, q, beh, cfg)
+    baseline = learn_greedy_policy(test, q, beh, cfg)
+    candidate = learn_conservative_policy(test, q, beh, cfg)
 
     ecfg = cfg.get("evaluation", {})
     return compare_policies(
         test, q, beh,
-        baseline_probs=v1.act(test.df)["policy_probs"],
-        candidate_probs=v2.act(test.df)["policy_probs"],
+        baseline_probs=baseline.act(test.df)["policy_probs"],
+        candidate_probs=candidate.act(test.df)["policy_probs"],
         weight_clip=cfg["ope"].get("weight_clip", 20.0),
         margin=ecfg.get("regression_margin", 0.02),
-        baseline_name=ecfg.get("baseline_name", "v1_greedy"),
-        candidate_name=ecfg.get("candidate_name", "v2_conservative"),
+        baseline_name=ecfg.get("baseline_name", "greedy_baseline"),
+        candidate_name=ecfg.get("candidate_name", "conservative_candidate"),
     )
 
 

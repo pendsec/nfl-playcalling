@@ -1,5 +1,5 @@
 """
-Policy Learning — conservative, behavior-regularized policy (V2).
+Policy Learning — conservative, behavior-regularized policy.
 
 Single-step contextual-bandit reduction of CQL/IQL: the learned policy maximizes
 a pessimism-penalized value

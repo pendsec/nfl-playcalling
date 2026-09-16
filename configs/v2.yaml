@@ -92,12 +92,13 @@ sensitivity:
 positivity:
   min_count: 10               # per-(stratum, action) support threshold
 
-evaluation:                    # version-over-version regression gate (Step 8)
-  # V2's conservative policy must not be significantly WORSE than V1's greedy
-  # policy on the held-out season, judged by paired DR. Failing to prove an
-  # improvement is fine; proving a deterioration blocks merge.
-  baseline_name: v1_greedy
-  candidate_name: v2_conservative
+evaluation:                    # policy regression gate (Step 8)
+  # The conservative policy must not be significantly WORSE than the
+  # behavior-constrained greedy baseline on the held-out season, judged by
+  # paired DR. Failing to prove an improvement is fine; proving a deterioration
+  # blocks merge.
+  baseline_name: greedy_baseline
+  candidate_name: conservative_candidate
   regression_margin: 0.02      # reward(-EPA)/play tolerated before blocking
 
 seed: 42

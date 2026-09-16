@@ -1,4 +1,4 @@
-"""Latent-treatment imputation (V3).
+"""Latent-treatment imputation.
 
 The coverage shell is charted on ~94% of dropbacks and ~3% of runs, because
 NGS records the coverage as PLAYED and a run never develops one. The shell was

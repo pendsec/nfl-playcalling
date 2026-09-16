@@ -205,3 +205,11 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project-specific
+# graphify-out/ is regenerable analysis output (AST/semantic caches, graph.json,
+# graph.html). Large, churns on every run, and carries no source of truth.
+graphify-out/
+
+# data/raw, data/processed and outputs/*.csv are covered by data/.gitignore and
+# outputs/.gitignore — kept there so the rule sits next to what it ignores.

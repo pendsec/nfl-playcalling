@@ -5,8 +5,10 @@ The Direct Method plugs the fitted Q-model into a candidate policy:
 
     V_DM(pi) = E_s [ sum_a  pi(a|s) * Q(s, a) ]
 
-It is biased if Q is misspecified — which is exactly V1's pathology — so V2 uses
-it only as the regression term inside the doubly-robust estimator
+It is biased whenever Q is misspecified, and the bias is worst exactly where it
+matters: off-support states, where a plug-in Q extrapolates to values no data
+backs. So it is used only as the regression term inside the doubly-robust
+estimator
 (`ope.doubly_robust.dr_policy_value`) and as one leg of the smoke test.
 
 `behavior_recovery_check` is the gate before trusting ANY candidate-policy

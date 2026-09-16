@@ -1,5 +1,5 @@
 """
-Causal Graph (SCM Skeleton) — V2.
+Causal Graph (SCM Skeleton).
 
 A hand-built DAG over the project variables. Its job is to discipline what every
 downstream model conditions on. The key rulings:
@@ -14,8 +14,8 @@ downstream model conditions on. The key rulings:
     change whether the offense runs at all.
   * coach_read is the UNOBSERVED confounder U: (S,U) -> def_playcall and
     (S,U) -> epa. Conditioning on the observed set leaves residual confounding
-    through coach_read — the explicit caveat the V2 sensitivity analysis bounds.
-  * coverage_charted is a SELECTION node, and the one the V2 dataset is built by
+    through coach_read — the explicit caveat the sensitivity analysis bounds.
+  * coverage_charted is a SELECTION node, and the one the dataset is built by
     conditioning on. A coverage shell only exists as a label where NGS charted
     one, so every modelled row has coverage_charted = 1. That is not innocuous:
     charting depends on off_playcall (runs are charted ~3% of the time vs ~94%
@@ -75,14 +75,14 @@ SELECTION = {CHARTED}
 # are declared here and guarded out of the state by
 # `scm.identify.assert_adjustment_consistency`.
 #
-# def_front is carried rather than modeled at V2: it is the only defensive
+# def_front is carried rather than modeled: it is the only defensive
 # attribute charted on ~99% of ALL snaps (runs included, where coverage is
-# charted on ~3%), which is why it becomes the primary axis of the V3 factored
+# charted on ~3%), which is why it becomes the primary axis of the factored
 # action space rather than staying a spectator.
 DEFENSIVE_CHOICE = {DEF_FRONT}
 DEF_CHOICE_COLUMNS = {DEF_FRONT: ["n_defense_box"]}
 
-# Measured on the V2 slice (SF, 2021-2023), so the strength of each selection
+# Measured on the SF 2021-2023 slice, so the strength of each selection
 # path is a number rather than a worry. Kept next to the edges they qualify.
 SELECTION_NOTES = {
     "charting_rate_pass": 0.936,   # dropbacks carry a shell label
@@ -235,5 +235,5 @@ def describe() -> str:
         f"  SELECTED ON: {sorted(SELECTION)} = 1 — the estimand is conditional on\n"
         f"    a charted dropback, so run/pass deterrence is outside it\n"
         f"  defensive choices carried but NOT adjusted for: {sorted(DEFENSIVE_CHOICE)}\n"
-        f"    (siblings of the treatment; the V3 factored action space)"
+        f"    (siblings of the treatment; the factored action space)"
     )

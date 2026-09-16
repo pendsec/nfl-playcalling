@@ -3,7 +3,7 @@
 Two preprocessors so linear and tree models each get what they need:
 
   * `build_state_preprocessor`  — standardized numerics + one-hot categoricals,
-    for regularized *linear* models (kept for baselines / the V1 tag).
+    for regularized *linear* models (kept for linear baselines).
   * `build_gbm_preprocessor`    — passthrough numerics + one-hot categoricals,
     for gradient-boosted trees (scale-invariant, so no StandardScaler).
 
