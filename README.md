@@ -5,7 +5,205 @@ defensive-playcall recommendation agent using causal reinforcement learning.
 
 See [CLAUDE.md](CLAUDE.md) for the full project design and phased build plan.
 
-## The pipeline
+---
+
+## Seven Steps to a Playcall
+
+A pipeline that reads years of football play-by-play and recommends what a
+defense should call — built almost entirely out of safeguards against fooling
+itself. Here is what each step is for, in plain language.
+
+### Start with why the obvious approach fails
+
+Before every snap, a defensive coordinator picks a call: a coverage shell plus
+whether to send extra pass rushers. We have years of records — the situation, the
+call, what happened next. The obvious idea is to find which calls led to the best
+outcomes and recommend those.
+
+That doesn't work, and the reason is the whole project. Coaches don't call plays
+at random. They choose based on things the data never recorded: how a matchup
+looked on film, what the offense has been showing all game, a read on the
+opposing quarterback. Those same unrecorded reasons also affect how the play
+turns out. So when a call looks good in the data, you genuinely cannot tell which
+of two stories is true.
+
+> **Did the call cause the good outcome — or do coaches simply choose it when
+> they're already in a good spot?**
+
+Every step below exists to pull those two apart. That is what "causal" means
+here, and it is why this is more than a prediction model.
+
+---
+
+#### Step 1 — Build the table  ·  `src/data/`
+
+**Turn raw play-by-play into one row per play: the situation, the call, the
+result.**
+
+The situation is everything known before the snap — down, distance, field
+position, score, time, personnel, formation, pre-snap motion. The call is one of
+twelve options. The result is measured in **expected points added**, a standard
+football statistic for how much a play helped the offense; we flip its sign,
+because a defense wants that number to go down.
+
+One rule governs this step absolutely: only information available *before* the
+snap goes into the situation. It sounds obvious and it is surprisingly easy to
+break.
+
+> **Without it** — the model quietly uses information from after the snap to
+> "predict" the snap. It scores brilliantly and knows nothing.
+
+#### Step 2 — Draw the map of causes  ·  `src/scm/`
+
+**Write down, by hand, what affects what — then let the math tell you what you're
+allowed to adjust for.**
+
+The game situation affects both the call and the outcome. The offense's own play
+is a *consequence* of the defensive call, not a cause of it. The coach's hidden
+read affects the call and the outcome, and is never recorded anywhere.
+
+This map decides everything downstream. Some variables must be controlled for;
+others must be deliberately left alone, because they sit *between* the call and
+the result — controlling for those would erase part of the very effect you're
+trying to measure. It is a genuinely counterintuitive rule, and getting it
+backwards is the classic way to produce a confident wrong answer.
+
+This step also asks a blunt question: are there situations where a given call
+simply never happened? If a defense never played a certain coverage on first
+down, no amount of cleverness can say what would have happened if they had.
+
+> **Without it** — you adjust for the wrong variables and get a precise,
+> confident, wrong number, with nothing to warn you.
+
+#### Step 3 — Learn what the coach actually does  ·  `src/models/behavior/`
+
+**Train a model to predict the coach's call from the situation — not the *good*
+call, the *actual* call.**
+
+This is the step most people find backwards. We are not trying to imitate the
+coach. We are measuring his tendencies so we can correct for them. Once you know
+that a coach calls this coverage 80% of the time on third-and-long, you know that
+the plays where he did something else are unusually informative about what the
+call itself does.
+
+These predicted probabilities become the correction weights that everything
+downstream leans on. They have to be well calibrated: when the model says 30%, it
+needs to happen about 30% of the time. A model that is merely accurate but
+overconfident will silently corrupt every number that follows.
+
+> **Without it** — no way to separate "this call worked" from "this call gets
+> chosen when the situation was already favorable."
+
+#### Step 4 — Estimate what would have happened  ·  `src/models/outcome/`
+
+**Predict the result of *any* call in a given situation — including the eleven
+that weren't made.**
+
+Step 1 records what did happen. This step answers the counterfactual: in this
+exact situation, what if they'd called something else? Without an answer to that,
+you can describe history but never compare alternatives, and a recommendation is
+by definition a claim about an alternative.
+
+It is built only from the variables the map in step 2 permits — which is what
+makes it an estimate of the call's *effect* rather than a description of the
+company it keeps.
+
+> **Without it** — you can grade the past but never propose a different future.
+
+#### Step 5 — Score a strategy without ever running it  ·  `src/ope/`
+
+**Estimate how well a proposed strategy *would have* performed, using only games
+that already happened.**
+
+Nobody gets to run experiments on real NFL seasons, so this is the central
+technical problem. The estimator combines steps 3 and 4: take the outcome model's
+prediction, then correct it using what actually happened, weighted by how
+surprising the coach's real call was. It is called **doubly robust** because it
+stays approximately right if *either* the outcome model or the behavior model is
+right — you need one of the two, not both.
+
+Before trusting it on anything new, it has to pass one test: score the coach's
+own strategy. We already know that answer — it is simply the average of what
+actually happened. An estimator that can't recover a number we already know has
+earned no credibility on numbers we don't.
+
+> **Without it** — the only way to evaluate a recommendation is to try it in a
+> real game and find out the expensive way.
+
+#### Step 6 — Make the recommendation, then attack it  ·  `src/policy/`
+
+**Choose the best-scoring call — deliberately hedged toward calls the data can
+actually support — and then test how easily the result falls apart.**
+
+The recommendation isn't a plain "pick the highest number." It carries a penalty
+pulling it toward calls the coach genuinely makes, and a hard floor that excludes
+any call with too little history in that kind of situation. The model is most
+confident exactly where it has the least evidence, so it is not allowed to wander
+there.
+
+Then the honest part. The coach's hidden read was never recorded, so it can never
+be adjusted away. Instead we ask: how strong would that hidden factor have to be
+to wipe out the apparent improvement? If a fairly mild one would do it, the
+pipeline says so out loud rather than reporting the improvement and staying quiet
+about the caveat.
+
+> **Without it** — confident recommendations in exactly the situations where no
+> data exists to back them.
+
+#### Step 7 — Make the recommendation earn its place  ·  `src/evaluation/`
+
+**Score the proposed strategy against the incumbent baseline on a season neither
+has seen — and refuse to ship one that's worse.**
+
+Both are scored on the same held-out plays with the same fitted models, so the
+comparison is like-for-like and the shared noise cancels rather than piling up.
+The gate is deliberately one-sided: failing to prove an improvement is an
+acceptable outcome, but a genuine deterioration stops the release.
+
+> **Without it** — every change claims to be an improvement, and nobody ever
+> checks whether it is.
+
+---
+
+### What the pipeline currently concludes
+
+**The conservative policy is not measurably better than the baseline.**
+
+Step 7 returned *no change detected*. Three seasons of one team's charted
+dropbacks, split across twelve possible calls, is simply too thin to resolve the
+difference — and the sensitivity check in step 6 says a mild unrecorded factor
+could explain away the apparent gain anyway.
+
+That is the system working. A naive approach on this same data reports a large
+improvement, and that number is an artifact of exactly the blind spots steps 2
+through 6 were built to catch. The contribution here isn't a bigger number — it's
+a number you can defend, and the machinery to tell the difference.
+
+One scope limit belongs in the headline rather than the footnotes: the coverage
+labels come from pass-play charting, so the model sees **charted dropbacks**, not
+every snap. A recommendation here reads *"given the offense drops back"* — see
+[What the estimand actually is](#what-the-estimand-actually-is).
+
+### What isn't built yet
+
+The full design has two further stages held back on purpose. One would generate
+synthetic "what if" plays to cover rare situations — powerful, and dangerous if
+the map in step 2 is wrong, so it waits. The other is deployment: running
+silently alongside a real coaching staff for a season and comparing notes before
+anyone acts on it.
+
+The ceiling for this system is a coach glancing at a second opinion, with the
+reasoning attached. It is not, and is not intended to be, something that calls
+plays.
+
+> **Scope** — all downs · one team's defense · 2022–2024 · charted dropbacks ·
+> 12 defensive calls (6 coverage shells × blitz / no blitz). Play-by-play from
+> nflfastR, pre-snap charting from FTN; every estimate stamped with the causal
+> map it assumed.
+
+---
+
+## Implementation
 
 An end-to-end causal-RL pipeline that produces and **credibly evaluates** a
 defensive policy. The problem is kept deliberately small — one team — so that
