@@ -3,18 +3,12 @@ Behavior Policy Model — pi_b(A | S).
 
 V2: a calibrated gradient-boosted classifier predicting which of the 12
 defensive calls the actual DC made in state S. This is the engine of IPW/DR:
-its propensities reweight logged plays, so **calibration is critical** —
+its propensities reweight plays, so **calibration is critical** —
 miscalibrated propensities silently break inverse-weighting.
-
-Upgrades over V1's logistic model:
-  * LightGBM instead of logistic (nonlinear state -> call structure).
-  * Isotonic probability calibration (`CalibratedClassifierCV`).
-  * Effective-sample-size (ESS) ratio reported alongside accuracy/log-loss/ECE
-    as the overlap/positivity health metric that bounds how far pi* can move.
 
 Rare-class discipline
 ---------------------
-A single-team 12-action slice routinely leaves one (coverage x blitz) cell with
+A 12-action slice routinely leaves at least one (coverage x blitz) cell with
 a lone play, and `StratifiedKFold` cannot split a class with fewer members than
 folds. The naive response — give up on cross-fitting whenever ANY class is
 un-splittable — is what makes the diagnostics dishonest: they fall back to
@@ -40,6 +34,7 @@ from sklearn.metrics import accuracy_score, log_loss
 from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
 
+from ..calibration import calibration_report
 from ..preprocess import build_gbm_preprocessor
 from ...schemas.dataset import Dataset
 from ...schemas.behavior import BehaviorModel, clip_normalize
@@ -73,18 +68,22 @@ def _cv_splits(y: np.ndarray, requested: int, seed: int) -> tuple[list[Split], n
     the honest "no cross-fitting possible" signal, distinct from "one class was
     awkward".
     """
+    # Get counts for each coverage call
     y = np.asarray(y)
     n_splits = max(2, int(requested))
     counts = pd.Series(y).value_counts()
 
+    # Define rare classes as calls for which there are less samples than folds
     rare_classes = counts.index[counts < n_splits].to_numpy()
     rare = np.isin(y, rare_classes) if len(rare_classes) else np.zeros(len(y), dtype=bool)
 
+    # Return no split if classes are too rare and no splitting can occur
     idx = np.arange(len(y))
     dense_idx, rare_idx = idx[~rare], idx[rare]
     if len(dense_idx) < n_splits or pd.Series(y[dense_idx]).nunique() < 2:
         return [], rare
 
+    # Create splits on dense calls and return splits along with entire set of rare calls
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     splits = [
         (np.concatenate([dense_idx[tr], rare_idx]), dense_idx[te])
@@ -178,7 +177,14 @@ def _diagnose(ds: Dataset, cfg: dict, model: BehaviorModel, calibrated: bool) ->
         "oof_accuracy": float(accuracy_score(y_c, preds)),
         "majority_baseline": float(base_rate),
         "oof_log_loss": float(log_loss(y_c, p_c, labels=list(range(ds.n_actions)))),
-        "ece": float(_expected_calibration_error(y_c, p_c)),
+        # Calibration is reported with a proper scoring rule beside it: ECE
+        # alone is minimized by a constant base-rate predictor, so it cannot
+        # distinguish "well calibrated" from "uninformative but well calibrated".
+        # `classwise_ece` is the one that matters here — propensities are
+        # inverted into importance weights, which use every column rather than
+        # just the argmax.
+        **calibration_report(y_c, p_c),
+        "ece": calibration_report(y_c, p_c)["confidence_ece"],  # back-compat key
         "ess_ratio": float(_ess_ratio(p_c, y_c)),
         "n_splits": n_splits,
         "calibrated": calibrated,
@@ -189,19 +195,6 @@ def _diagnose(ds: Dataset, cfg: dict, model: BehaviorModel, calibrated: bool) ->
         "rare_classes": sorted(set(y[rare].tolist())),
         "action_counts": pd.Series(y).value_counts().sort_index().to_dict(),
     }
-
-
-def _expected_calibration_error(y: np.ndarray, proba: np.ndarray, n_bins: int = 10) -> float:
-    """ECE on the predicted-probability of the realized action (10 bins)."""
-    conf = proba[np.arange(len(y)), y]
-    correct = (proba.argmax(axis=1) == y).astype(float)
-    bins = np.linspace(0, 1, n_bins + 1)
-    ece = 0.0
-    for lo, hi in zip(bins[:-1], bins[1:]):
-        m = (conf >= lo) & (conf < hi)
-        if m.any():
-            ece += m.mean() * abs(correct[m].mean() - conf[m].mean())
-    return ece
 
 
 def _ess_ratio(proba: np.ndarray, y: np.ndarray) -> float:

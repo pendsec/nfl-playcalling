@@ -38,6 +38,42 @@ PBP_COLUMNS = [
 # Bump when PBP_COLUMNS changes so stale caches are transparently rebuilt.
 CACHE_VERSION = "v2"
 
+# ── FTN charting ────────────────────────────────────────────────────────────
+# FTN charts every play, including runs — which nflfastR's NGS coverage columns
+# do not (coverage is labeled on ~94% of dropbacks and ~3% of runs, because it
+# records the coverage as PLAYED and a run never develops one). FTN is the only
+# free source here for a defensive attribute observed on every snap.
+#
+# The grouping below is the whole point of this module's FTN support: these
+# columns differ in WHEN they become knowable, and mixing the groups is a
+# causal error rather than a style preference.
+FTN_FIRST_SEASON = 2022
+
+# Pre-snap, offensive presentation. The defense sees these before the call, so
+# they are legitimate confounders and go into the adjustment set.
+FTN_PRESNAP_OFFENSE = ["is_motion", "n_offense_backfield", "qb_location"]
+
+# Pre-snap, but a DEFENSIVE CHOICE — a sibling of the treatment, not a cause of
+# it. Carried through for the V3 factored action space; never a state feature,
+# because adjusting for part of the defense's own decision would block the very
+# effect being estimated. See scm.graph.DEF_FRONT.
+FTN_PRESNAP_DEFENSE = ["n_defense_box"]
+
+# Post-snap reveals. Carried so the mediator structure can be studied (and so
+# the leak guard has something to guard against), NEVER used as state.
+FTN_POSTSNAP = ["is_play_action", "is_rpo", "is_screen_pass"]
+
+FTN_COLUMNS = FTN_PRESNAP_OFFENSE + FTN_PRESNAP_DEFENSE + FTN_POSTSNAP
+FTN_JOIN_KEYS = ["nflverse_game_id", "nflverse_play_id"]
+
+# FTN fills these with a literal zero / "0" on non-scrimmage plays (kicks,
+# punts, timeouts) rather than leaving them null. A handful of scrimmage rows
+# carry it too. Zero defenders in the box is not a real alignment, so the
+# sentinel is scrubbed to NaN instead of being read as a count.
+FTN_ZERO_IS_MISSING = ["n_defense_box", "qb_location", "starting_hash"]
+
+FTN_CACHE_VERSION = "v1"
+
 # The six canonical coverage shells the V2 action space factors over. Order is
 # roughly increasing zone depth (man/press -> deep zone), which the synthetic
 # SCM and the "ideal shell rises with distance" story both rely on.
@@ -69,6 +105,70 @@ def load_pbp(seasons: list[int], cache_dir: str = "data/raw") -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def load_ftn(seasons: list[int], cache_dir: str = "data/raw") -> pd.DataFrame:
+    """Load FTN charting for `seasons`, caching one parquet per season.
+
+    Seasons before `FTN_FIRST_SEASON` are skipped rather than failing — FTN
+    simply does not exist for them, and `merge_ftn` reports the resulting
+    coverage so the gap is visible instead of silently becoming NaN features.
+    """
+    import nfl_data_py as nfl
+
+    os.makedirs(cache_dir, exist_ok=True)
+    frames = []
+    for yr in seasons:
+        if yr < FTN_FIRST_SEASON:
+            continue
+        path = os.path.join(cache_dir, f"ftn_{yr}_{FTN_CACHE_VERSION}.parquet")
+        if os.path.exists(path):
+            frames.append(pd.read_parquet(path))
+            continue
+        df = nfl.import_ftn_data([yr])
+        keep = [c for c in FTN_JOIN_KEYS + FTN_COLUMNS if c in df.columns]
+        df = df[keep].copy()
+        df.to_parquet(path, index=False)
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame(columns=FTN_JOIN_KEYS + FTN_COLUMNS)
+    return pd.concat(frames, ignore_index=True)
+
+
+def merge_ftn(pbp: pd.DataFrame, ftn: pd.DataFrame) -> pd.DataFrame:
+    """Left-join FTN charting onto play-by-play and scrub its zero sentinels.
+
+    Left, not inner: an inner join would silently delete every pre-2022 season
+    instead of surfacing that FTN does not cover them. `ftn_coverage` reports
+    what actually matched, and the feature builder refuses to train on a season
+    whose coverage is too thin.
+    """
+    if ftn.empty:
+        out = pbp.copy()
+        for c in FTN_COLUMNS:
+            out[c] = np.nan
+        return out
+
+    ftn = ftn.drop_duplicates(subset=FTN_JOIN_KEYS)
+    out = pbp.merge(ftn, how="left",
+                    left_on=["game_id", "play_id"], right_on=FTN_JOIN_KEYS)
+    for c in FTN_ZERO_IS_MISSING:
+        if c in out.columns:
+            out[c] = out[c].replace({0: np.nan, "0": np.nan})
+    return out.drop(columns=[k for k in FTN_JOIN_KEYS if k in out.columns])
+
+
+def ftn_coverage(df: pd.DataFrame, probe: str = "n_defense_box") -> pd.DataFrame:
+    """Per-season share of scrimmage plays carrying FTN charting."""
+    if probe not in df.columns:
+        return pd.DataFrame(columns=["season", "n_plays", "ftn_coverage"])
+    scrimmage = df[df["play_type"].isin(["pass", "run"]) & df["epa"].notna()]
+    return (
+        scrimmage.assign(_ok=scrimmage[probe].notna())
+        .groupby("season")["_ok"]
+        .agg(n_plays="size", ftn_coverage="mean")
+        .reset_index()
+    )
+
+
 # ── Synthetic SCM ───────────────────────────────────────────────────────────
 # Known unobserved-confounding strength (reward units, U -> R path). The
 # sensitivity analysis is validated against this: a Rosenbaum bound whose
@@ -76,13 +176,15 @@ def load_pbp(seasons: list[int], cache_dir: str = "data/raw") -> pd.DataFrame:
 CONF_STRENGTH = 0.20
 
 
-def generate_synthetic(n_plays: int = 8000, seed: int = 7) -> pd.DataFrame:
+def generate_synthetic(n_plays: int = 8000, seed: int = 7,
+                       seasons: list[int] | None = None) -> pd.DataFrame:
     """Simulate all-downs plays from a known 12-action structural causal model.
 
     Ground-truth SCM (defense perspective, reward = -EPA so higher is better):
 
         S  (state)      : down, ydstogo, yardline_100, score_diff, time,
-                          formation, plus a QB identity with latent skill.
+                          formation, pre-snap motion / backfield count / QB
+                          alignment, plus a QB identity with latent skill.
         U  (confounder) : `coach_read` — a hidden pre-snap read that drives BOTH
                           the DC's call AND the outcome. This is the selection
                           effect naive RL conflates with the causal effect; the
@@ -107,6 +209,10 @@ def generate_synthetic(n_plays: int = 8000, seed: int = 7) -> pd.DataFrame:
     """
     rng = np.random.default_rng(seed)
     n = n_plays
+    # Follow the configured season window rather than hard-coding one: the
+    # time-aware split holds out `holdout_season`, so a generator stuck on its
+    # own years silently yields an empty holdout when the config window moves.
+    seasons = list(seasons) if seasons else [2021, 2022, 2023]
 
     # ── State ────────────────────────────────────────────────────────────────
     down = rng.integers(1, 5, n).astype(float)          # 1..4
@@ -115,6 +221,15 @@ def generate_synthetic(n_plays: int = 8000, seed: int = 7) -> pd.DataFrame:
     score_diff = rng.normal(0, 10, n).round()
     game_seconds_remaining = rng.integers(0, 3600, n).astype(float)
     is_shotgun = (rng.random(n) < (0.4 + 0.02 * ydstogo)).astype(int)
+
+    # Pre-snap offensive presentation (the FTN-charted confounders). Motion is a
+    # genuine confounder here, not decoration: the DC blitzes less against it AND
+    # it helps the offense, so a model that fails to adjust for it is biased —
+    # which is what makes the adjustment-set tests worth running.
+    is_motion = (rng.random(n) < 0.35).astype(int)
+    n_backfield = np.where(is_shotgun == 1,
+                           rng.choice([0, 1, 2], n, p=[0.15, 0.75, 0.10]),
+                           rng.choice([1, 2], n, p=[0.8, 0.2]))
 
     # QB identity with latent skill — an observed-proxy cause of the outcome
     # (good QB -> higher offensive EPA -> lower defensive reward). Proxied
@@ -147,7 +262,8 @@ def generate_synthetic(n_plays: int = 8000, seed: int = 7) -> pd.DataFrame:
 
     # Pressure: blitz propensity rises with distance (sensible) AND with a
     # favorable read (the confounding).
-    p_blitz = _sigmoid(-0.3 + 0.5 * long_yardage + 0.7 * coach_read)
+    p_blitz = _sigmoid(-0.3 + 0.5 * long_yardage + 0.7 * coach_read
+                       - 0.4 * is_motion)
     blitz = (rng.random(n) < p_blitz).astype(int)
 
     action = shell * 2 + blitz  # 0..11
@@ -156,7 +272,8 @@ def generate_synthetic(n_plays: int = 8000, seed: int = 7) -> pd.DataFrame:
     coverage_reward = -0.03 * (shell - ideal_shell) ** 2          # peaks at ideal
     true_blitz_effect = 0.06 + 0.05 * long_yardage - 0.08 * qb_skill
     qb_term = -0.10 * qb_skill                                     # good QB hurts defense
-    base = 0.02 * long_yardage - 0.01 * (yardline_100 - 50) / 50.0
+    base = (0.02 * long_yardage - 0.01 * (yardline_100 - 50) / 50.0
+            - 0.05 * is_motion)          # motion helps the offense -> confounder
     reward = (
         coverage_reward
         + true_blitz_effect * blitz
@@ -171,7 +288,7 @@ def generate_synthetic(n_plays: int = 8000, seed: int = 7) -> pd.DataFrame:
     df = pd.DataFrame({
         "game_id": np.repeat(np.arange(n // 40 + 1), 40)[:n],
         "play_id": np.arange(n),
-        "season": rng.choice([2021, 2022, 2023], n),
+        "season": rng.choice(seasons, n),
         "week": rng.integers(1, 18, n),
         "defteam": "SYN",
         "posteam": "OPP",
@@ -194,6 +311,17 @@ def generate_synthetic(n_plays: int = 8000, seed: int = 7) -> pd.DataFrame:
         "defense_man_zone_type": np.where(shell <= 1, "MAN_COVERAGE", "ZONE_COVERAGE"),
         "number_of_pass_rushers": np.where(blitz == 1, 5, 4),
         "defenders_in_box": np.where(blitz == 1, 7, 6),
+        # FTN-charted columns. n_defense_box follows the defensive CALL (a
+        # sibling of the treatment, never a confounder); the offensive ones are
+        # pre-snap presentation; the is_* flags are post-snap reveals carried
+        # only so the leak guards have something real to reject.
+        "n_defense_box": np.clip(6 + blitz + rng.integers(-1, 2, n), 4, 9),
+        "is_motion": is_motion.astype(bool),
+        "n_offense_backfield": n_backfield.astype(float),
+        "qb_location": np.where(is_shotgun == 1, "S", "U"),
+        "is_play_action": (rng.random(n) < 0.20),
+        "is_rpo": (rng.random(n) < 0.08),
+        "is_screen_pass": (rng.random(n) < 0.06),
         "passer_player_id": np.array([f"QB{i}" for i in qb_ids]),
         "epa": epa,
         # Ground-truth columns — carried through build_dataset for the tests

@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .load import COVERAGE_SHELLS, N_SHELLS
+from .load import (COVERAGE_SHELLS, FTN_POSTSNAP, FTN_PRESNAP_DEFENSE,
+                   N_SHELLS, ftn_coverage)
 from ..schemas.dataset import Dataset
 
 # 12-action space: coverage shell (6) x pressure (blitz / no-blitz).
@@ -50,8 +51,25 @@ NUMERIC_STATE = [
     "num_rb", "num_te", "num_wr",
     "is_two_minute_drill", "is_red_zone", "is_third_or_fourth", "scoring_opp",
     "off_pass_tendency", "def_team_avg_epa", "qb_avg_epa",
+    # FTN-charted pre-snap offensive presentation. The defense sees all three
+    # before committing to a call, so they are ordinary confounders.
+    "is_motion", "n_offense_backfield",
 ]
-CATEGORICAL_STATE = ["formation"]
+CATEGORICAL_STATE = ["formation", "qb_location"]
+
+# Columns kept in the built frame but NEVER offered to a model as state.
+#
+#   n_defense_box  — pre-snap, but a DEFENSIVE choice: a sibling of the
+#     treatment rather than a cause of it. Adjusting for part of the defense's
+#     own decision would block the effect being estimated. Carried because it is
+#     the only defensive attribute charted on ~99% of snaps (runs included), and
+#     therefore the primary axis of the V3 factored action space.
+#   is_play_action / is_rpo / is_screen_pass — post-snap reveals. Carried so the
+#     mediator structure can be studied, and so the leak guard in
+#     `scm.identify.assert_adjustment_consistency` has real columns to reject.
+#
+# `test_carried_columns_never_enter_the_state` is what keeps this honest.
+CARRIED_COLUMNS = list(FTN_PRESNAP_DEFENSE) + list(FTN_POSTSNAP)
 
 
 def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
@@ -95,7 +113,7 @@ def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
     cols = (
         ["game_id", "play_id", "season", "week", "epa", "reward",
          "action", "action_label"]
-        + NUMERIC_STATE + CATEGORICAL_STATE + ground_truth
+        + NUMERIC_STATE + CATEGORICAL_STATE + CARRIED_COLUMNS + ground_truth
     )
     cols = [c for c in cols if c in df.columns]
     df = df[cols].dropna(subset=NUMERIC_STATE + ["action"]).reset_index(drop=True)
@@ -207,8 +225,65 @@ def _build_state(df: pd.DataFrame) -> pd.DataFrame:
     df["formation"] = df.get("offense_formation", pd.Series("UNKNOWN", index=df.index)) \
         .fillna("UNKNOWN").astype(str).str.upper()
 
+    df = _build_ftn_state(df)
     df = _add_history_features(df)
     return df
+
+
+def _build_ftn_state(df: pd.DataFrame) -> pd.DataFrame:
+    """FTN-charted pre-snap features, plus the carried non-state columns.
+
+    Defaults here are deliberate rather than convenient: FTN does not cover
+    seasons before 2022, and `build_dataset` drops rows with missing numeric
+    state, so an un-defaulted column would silently delete every pre-FTN season
+    instead of reporting the gap. `assert_ftn_coverage` is what turns that gap
+    into an error when it matters.
+    """
+    if "is_motion" in df.columns:
+        df["is_motion"] = df["is_motion"].astype("boolean").fillna(False).astype(int)
+    else:
+        df["is_motion"] = 0
+    # 1 back is the modal alignment; FTN leaves ~3% of scrimmage plays unlabeled.
+    df["n_offense_backfield"] = pd.to_numeric(
+        df.get("n_offense_backfield"), errors="coerce").fillna(1.0)
+    df["qb_location"] = (
+        df.get("qb_location", pd.Series("UNK", index=df.index))
+        .astype("string").fillna("UNK").replace("0", "UNK").astype(str)
+    )
+    for c in CARRIED_COLUMNS:
+        if c not in df.columns:
+            df[c] = pd.NA
+    return df
+
+
+def assert_ftn_coverage(df: pd.DataFrame, cfg: dict) -> None:
+    """Refuse to train FTN features on a season FTN does not cover.
+
+    Silently training on a systematically-missing feature is the failure this
+    prevents: with seasons 2021-2023 and FTN starting in 2022, every 2021 row
+    would carry the default value, and the model would learn "no motion" as a
+    property of 2021 rather than of the play. Better a loud error naming the
+    seasons than a quietly season-confounded feature.
+    """
+    if not cfg["data"].get("use_ftn", False):
+        return
+    min_cov = cfg["data"].get("ftn_min_coverage", 0.80)
+    holdout = cfg["data"]["holdout_season"]
+    probe = FTN_PRESNAP_DEFENSE[0]
+    if probe not in df.columns:
+        raise ValueError(f"use_ftn is set but {probe!r} is absent — FTN never merged.")
+    # Measure on scrimmage plays only. FTN charts nothing on kickoffs, punts,
+    # field goals or timeouts, and counting those as misses makes a fully-covered
+    # season look ~65% covered.
+    cov = ftn_coverage(df, probe)
+    bad = sorted(int(r.season) for _, r in cov.iterrows()
+                 if r.ftn_coverage < min_cov)
+    if bad:
+        raise ValueError(
+            f"FTN coverage below {min_cov:.0%} for season(s) {bad} "
+            f"(FTN starts in 2022). Either set data.seasons to FTN-covered years "
+            f"(holdout is currently {holdout}), or set data.use_ftn: false."
+        )
 
 
 def _add_history_features(df: pd.DataFrame) -> pd.DataFrame:

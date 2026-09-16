@@ -61,6 +61,17 @@ def assert_adjustment_consistency(ds: Dataset) -> list[str]:
             f"Selection variable(s) used as state features: {selected}. The sample "
             "is conditioned on these; they cannot also be adjusted for."
         )
+    # Box count is pre-snap, which makes it look like a perfectly good
+    # confounder. It is not: it is part of the defense's own decision, so
+    # adjusting for it would block a slice of the effect being estimated.
+    own_choice = [c for cols in scm.DEF_CHOICE_COLUMNS.values() for c in cols
+                  if c in ds.state_cols]
+    if own_choice:
+        raise ValueError(
+            f"Defensive-choice column(s) used as state features: {own_choice}. "
+            "These are siblings of the treatment, not causes of it — see "
+            "scm.graph.DEFENSIVE_CHOICE."
+        )
     # State and adjustment set must be the same thing by construction.
     extra = set(ds.state_cols) - set(declared)
     if extra:
@@ -168,7 +179,8 @@ def visualize_dag(save_path: str) -> None:
                  "#2C3E50" if n == scm.OUTCOME else
                  "#9B59B6" if n in scm.UNOBSERVED else
                  "#E87040" if n in scm.MEDIATORS else
-                 "#7F8C8D" if n in scm.SELECTION else "#4A90D9")
+                 "#7F8C8D" if n in scm.SELECTION else
+                 "#C0553B" if n in scm.DEFENSIVE_CHOICE else "#4A90D9")
              for n in g.nodes()}
     fig, ax = plt.subplots(figsize=(11, 8))
     pos = nx.spring_layout(g, seed=1)

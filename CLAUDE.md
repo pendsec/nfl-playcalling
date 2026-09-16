@@ -82,7 +82,10 @@ Every version ships a narrated demo notebook (`notebooks/vN_pipeline_walkthrough
 ### V3 - Scale and Transfer
 - **Scope**: multi-team, factored 50+ action space.
 - **Models**: neural π_b and Q-model with embeddings (team, QB, OC), invariant policy learning across seasons/teams, hierarchical factored policy.
-- **Add**: explainability layer surfacing top causal features per recommendation; standalone IPW estimator to complete the DM -> IPW -> DR ladder (deferred from V2 — see Step 5); econml CATE estimators.
+- **Add**: explainability layer surfacing top causal features per recommendation; standalone IPW estimator to complete the DM -> IPW -> DR ladder (deferred from V2 — see Step 5); econml CATE estimators; **Dirichlet / vector scaling** for the shell imputer (deferred from V2 — see below).
+- **Latent-treatment imputation** (`src/models/imputation/`, built at V2, not yet wired into a pipeline): coverage shell imputed for run plays from a calibrated pre-snap posterior, sampled m times and pooled by Rubin's rules. Declared feature set in `imputation/features.py` (19 features), guarded by `assert_imputer_features` the way the SCM adjustment set is guarded by `assert_adjustment_consistency`.
+  - **Calibration is the open item.** Temperature scaling (cross-fitted over 5 folds) fixes top-class confidence — confidence ECE 0.0321 -> 0.0199 — but barely moves **classwise ECE** (0.0378 -> 0.0372), and classwise is what matters here because the posterior is *sampled from* rather than argmaxed. A single global scalar cannot reshape per-class probabilities; Dirichlet (K^2+K params) or vector scaling (2K) is the next rung.
+  - **Known costs, measured**: information removed from the 6-way prior is only ~19.6%; two independent draws agree on ~32% of plays; ~43% of pooled variance comes from not knowing the label. Excluding the outcome from the imputer attenuates recovered effects toward null (deliberate, conservative, and pinned by `test_imputation_attenuates_effects_toward_the_marginal`).
 - **Demo**: `notebooks/v3_pipeline_walkthrough.ipynb` — multi-team transfer story: cross-team/season OPE, invariance checks, hierarchical-policy drill-down, and the per-recommendation causal-feature explanations.
 
 ### V4 - Power-Ups
@@ -151,6 +154,7 @@ tests/              # unit + integration; synthetic SCM regression tests
 ## Data Sources
 
 - **nflfastR** (NFL play-by-play, free)
+- **FTN charting** (free, 2022+, via `nfl_data_py.import_ftn_data`) - play-level charting on ~99% of scrimmage plays **including runs**: `n_defense_box`, `is_motion`, `n_offense_backfield`, `qb_location`, plus post-snap `is_play_action` / `is_rpo` / `is_screen_pass`. This is the only free source of a defensive attribute observed on every snap, since NGS coverage labels are ~94% on dropbacks and ~3% on runs.
 - **CFBfastR** (college play-by-play, free)
 - **NFL Next Gen Stats** (tracking, public release - limited)
 - **PFF** (charted coverages, participation - paid; needed for cleaner defensive labels)

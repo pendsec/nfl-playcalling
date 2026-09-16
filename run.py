@@ -30,8 +30,10 @@ logging.disable(logging.WARNING)  # quiet DoWhy / LightGBM chatter
 
 from src.scm import graph as scm
 from src.scm import identify
-from src.data.load import load_pbp, generate_synthetic, true_policy_value
-from src.data.features import build_dataset, slice_report, time_aware_split
+from src.data.load import (load_pbp, load_ftn, merge_ftn, ftn_coverage,
+                           generate_synthetic, true_policy_value)
+from src.data.features import (assert_ftn_coverage, build_dataset,
+                               slice_report, time_aware_split)
 from src.models.behavior.propensity import fit_behavior_model
 from src.models.outcome.q_model import fit_q_model, crossfit_q
 from src.ope.direct_method import behavior_recovery_check, dm_policy_value
@@ -61,12 +63,21 @@ def main(config_path: str, source_override: str | None) -> None:
     # ── 1. Data ──────────────────────────────────────────────────────────────
     _rule("[1/7] Data layer")
     if cfg["data"]["source"] == "synthetic":
-        pbp = generate_synthetic(cfg["synthetic"]["n_plays"], cfg["synthetic"]["seed"])
+        pbp = generate_synthetic(cfg["synthetic"]["n_plays"], cfg["synthetic"]["seed"],
+                                 seasons=cfg["data"]["seasons"])
         cfg["data"]["team"] = "SYN"
         print(f"  synthetic SCM: {len(pbp):,} plays")
     else:
         pbp = load_pbp(cfg["data"]["seasons"], cfg["data"]["cache_dir"])
         print(f"  nflfastR: {len(pbp):,} raw plays, seasons {cfg['data']['seasons']}")
+        if cfg["data"].get("use_ftn", False):
+            pbp = merge_ftn(pbp, load_ftn(cfg["data"]["seasons"],
+                                          cfg["data"]["cache_dir"]))
+            cov = ftn_coverage(pbp)
+            rates = "  ".join(f"{int(r.season)}:{r.ftn_coverage:.0%}"
+                              for _, r in cov.iterrows())
+            print(f"  FTN charting merged — coverage by season: {rates}")
+    assert_ftn_coverage(pbp, cfg)
 
     for _, row in slice_report(pbp, cfg).iterrows():
         verdict = "in slice" if row["in_slice"] else "EXCLUDED (see data.play_types)"

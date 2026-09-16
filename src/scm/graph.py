@@ -48,11 +48,14 @@ OFF_PLAYCALL = "off_playcall"    # offense's run/pass call — MEDIATOR (exclude
 DEF_PLAYCALL = "def_playcall"    # treatment A
 EPA = "epa"                      # outcome R (reward = -EPA)
 CHARTED = "coverage_charted"     # SELECTION: was a coverage shell labeled at all?
+DEF_FRONT = "def_front"          # defensive box/front commitment — a SIBLING of
+                                 # the treatment, not a cause of it
 
 OBSERVED_CONFOUNDERS = [
     GAME_STATE, OFF_PERSONNEL, OFF_FORMATION, OFF_TENDENCIES, PLAYER_PROXIES,
 ]
-OBSERVED = set(OBSERVED_CONFOUNDERS) | {OFF_PLAYCALL, DEF_PLAYCALL, EPA, CHARTED}
+OBSERVED = set(OBSERVED_CONFOUNDERS) | {OFF_PLAYCALL, DEF_PLAYCALL, EPA, CHARTED,
+                                        DEF_FRONT}
 UNOBSERVED = {COACH_READ}
 
 TREATMENT = DEF_PLAYCALL
@@ -64,6 +67,20 @@ MEDIATORS = {OFF_PLAYCALL}
 # the estimates carry whether or not it is written down — which is why it is
 # written down, and hashed into the graph fingerprint.
 SELECTION = {CHARTED}
+
+# Other components of the defense's own decision. These are observed, and they
+# are pre-snap, which makes them tempting to drop into the adjustment set — but
+# they are SIBLINGS of the treatment, not causes of it. Conditioning on part of
+# the defense's own call blocks a slice of the effect being estimated, so they
+# are declared here and guarded out of the state by
+# `scm.identify.assert_adjustment_consistency`.
+#
+# def_front is carried rather than modeled at V2: it is the only defensive
+# attribute charted on ~99% of ALL snaps (runs included, where coverage is
+# charted on ~3%), which is why it becomes the primary axis of the V3 factored
+# action space rather than staying a spectator.
+DEFENSIVE_CHOICE = {DEF_FRONT}
+DEF_CHOICE_COLUMNS = {DEF_FRONT: ["n_defense_box"]}
 
 # Measured on the V2 slice (SF, 2021-2023), so the strength of each selection
 # path is a number rather than a worry. Kept next to the edges they qualify.
@@ -97,6 +114,13 @@ EDGES = [
                                          # so off_playcall is a genuine mediator
     (COACH_READ, DEF_PLAYCALL),          # unobserved confounding into the call
     (COACH_READ, EPA),                   # unobserved confounding into the outcome
+    (GAME_STATE, DEF_FRONT), (OFF_PERSONNEL, DEF_FRONT),
+    (OFF_FORMATION, DEF_FRONT),
+    (COACH_READ, DEF_FRONT),             # the same hidden read drives the front
+    (DEF_FRONT, EPA),                    # +0.068 reward/defender vs the run,
+                                         # -0.020 vs the pass (2021-23, league)
+    (DEF_FRONT, OFF_PLAYCALL),           # and it moves the offense's hand: run
+                                         # rate runs 14% (<=5 box) to 65% (8+)
     (OFF_PLAYCALL, CHARTED),             # coverage is charted on dropbacks only
     (EPA, CHARTED),                      # shorthand for "the play broke down":
                                          # a sack/scramble is both a great
@@ -115,7 +139,9 @@ CONFOUNDER_COLUMNS = {
         "is_two_minute_drill", "is_red_zone", "is_third_or_fourth", "scoring_opp",
     ],
     OFF_PERSONNEL: ["num_rb", "num_te", "num_wr"],
-    OFF_FORMATION: ["formation", "shotgun", "no_huddle"],
+    OFF_FORMATION: ["formation", "shotgun", "no_huddle",
+                    # FTN-charted pre-snap presentation (2022+).
+                    "is_motion", "n_offense_backfield", "qb_location"],
     OFF_TENDENCIES: ["off_pass_tendency"],
     PLAYER_PROXIES: ["def_team_avg_epa", "qb_avg_epa"],
 }
@@ -134,7 +160,10 @@ CONFOUNDER_COLUMNS = {
 # v2.1 — added def_playcall -> off_playcall (making the declared mediator an
 # actual one) and the coverage_charted selection node. Both are structural
 # claims, so every estimate stamped v2.0 was computed under a different graph.
-GRAPH_VERSION = "v2.1"
+# v2.2 — added the def_front node (FTN box count: a defensive choice, carried
+# but never adjusted for) and the FTN pre-snap offensive confounders
+# is_motion / n_offense_backfield / qb_location to the adjustment set.
+GRAPH_VERSION = "v2.2"
 
 
 def fingerprint() -> str:
@@ -153,6 +182,7 @@ def fingerprint() -> str:
         ";".join(sorted(UNOBSERVED)),
         ";".join(sorted(MEDIATORS)),
         ";".join(sorted(SELECTION)),
+        ";".join(sorted(DEFENSIVE_CHOICE)),
         f"{TREATMENT}->{OUTCOME}",
         ";".join(adjustment_columns()),
     ])
@@ -203,5 +233,7 @@ def describe() -> str:
         f"  unobserved confounders: {sorted(UNOBSERVED)} "
         f"(bounded by the sensitivity analysis)\n"
         f"  SELECTED ON: {sorted(SELECTION)} = 1 — the estimand is conditional on\n"
-        f"    a charted dropback, so run/pass deterrence is outside it"
+        f"    a charted dropback, so run/pass deterrence is outside it\n"
+        f"  defensive choices carried but NOT adjusted for: {sorted(DEFENSIVE_CHOICE)}\n"
+        f"    (siblings of the treatment; the V3 factored action space)"
     )

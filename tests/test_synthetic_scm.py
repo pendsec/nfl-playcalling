@@ -21,12 +21,15 @@ import os
 import sys
 
 import numpy as np
+import pandas as pd
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.data.load import generate_synthetic, true_policy_value
-from src.data.features import build_dataset, time_aware_split
+from src.data.load import (FTN_POSTSNAP, FTN_PRESNAP_DEFENSE, generate_synthetic,
+                           merge_ftn, true_policy_value)
+from src.data.features import (CARRIED_COLUMNS, assert_ftn_coverage,
+                               build_dataset, time_aware_split)
 from src.schemas.dataset import Dataset
 from src.scm import graph as scm
 from src.scm import identify
@@ -104,7 +107,13 @@ def test_scm_adjustment_matches_state(fitted):
 def test_pi_b_beats_majority_and_calibrated(fitted):
     diag = fitted["diag"]
     assert diag["oof_accuracy"] > diag["majority_baseline"]
-    assert diag["ece"] < 0.30           # calibrated within a loose tolerance
+    # Threshold tightened from 0.30 now that the metric measures calibration.
+    # The old ECE binned by the TRUE class's probability while scoring ARGMAX
+    # correctness, and read ~0.25 for a perfectly calibrated model — so 0.30 was
+    # passing on essentially anything.
+    assert diag["confidence_ece"] < 0.10
+    assert diag["classwise_ece"] < 0.10
+    assert diag["brier"] > 0.0
     assert 0.0 < diag["ess_ratio"] <= 1.0
 
 
@@ -509,3 +518,94 @@ def test_graph_version_was_bumped_for_the_structural_change():
     """
     assert scm.GRAPH_VERSION >= "v2.1"
     assert scm.version_tag().startswith(scm.GRAPH_VERSION + "+")
+
+# ── FTN integration ──────────────────────────────────────────────────────────
+def test_ftn_presnap_features_are_in_the_state_and_adjustment_set(fitted):
+    """FTN's pre-snap offensive presentation is an ordinary confounder."""
+    ds = fitted["ds"]
+    for c in ("is_motion", "n_offense_backfield", "qb_location"):
+        assert c in ds.state_cols, f"{c} should be adjusted for"
+        assert c in scm.adjustment_columns()
+    identify.assert_adjustment_consistency(ds)
+
+
+def test_carried_columns_never_enter_the_state(fitted):
+    """n_defense_box and the post-snap flags are carried, never modeled.
+
+    Two different errors guarded by one test. Box count is pre-snap and looks
+    like a fine confounder, but it is part of the defense's own decision, so
+    adjusting for it blocks a slice of the effect. The is_* flags are post-snap
+    reveals and would be outright leakage.
+    """
+    ds = fitted["ds"]
+    assert CARRIED_COLUMNS, "nothing carried — did the FTN merge silently drop?"
+    for c in CARRIED_COLUMNS:
+        assert c in ds.df.columns, f"{c} should be carried through build_dataset"
+        assert c not in ds.state_cols, f"{c} must not be a state feature"
+        assert c not in scm.adjustment_columns()
+
+
+def test_box_count_is_rejected_as_a_confounder(fitted):
+    """The guard must actually fire, not just be documented."""
+    ds = fitted["ds"]
+    box = FTN_PRESNAP_DEFENSE[0]
+    polluted = Dataset(
+        df=ds.df, numeric_state=ds.numeric_state + [box],
+        categorical_state=ds.categorical_state, action_col=ds.action_col,
+        reward_col=ds.reward_col, n_actions=ds.n_actions,
+        action_labels=ds.action_labels,
+    )
+    with pytest.raises(ValueError, match="[Dd]efensive-choice"):
+        identify.assert_adjustment_consistency(polluted)
+
+
+def test_postsnap_ftn_flags_are_rejected_as_state(fitted):
+    """is_play_action / is_rpo / is_screen_pass are mediators, not features."""
+    ds = fitted["ds"]
+    polluted = Dataset(
+        df=ds.df, numeric_state=ds.numeric_state + list(FTN_POSTSNAP),
+        categorical_state=ds.categorical_state, action_col=ds.action_col,
+        reward_col=ds.reward_col, n_actions=ds.n_actions,
+        action_labels=ds.action_labels,
+    )
+    with pytest.raises(ValueError):
+        identify.assert_adjustment_consistency(polluted)
+
+
+def test_ftn_zero_sentinel_is_scrubbed_to_missing():
+    """FTN writes 0 / "0" where it charts nothing; 0 defenders is not a front."""
+    pbp = pd.DataFrame({
+        "game_id": ["g1", "g1"], "play_id": [1, 2],
+        "season": [2023, 2023], "play_type": ["pass", "pass"], "epa": [0.1, -0.2],
+    })
+    ftn = pd.DataFrame({
+        "nflverse_game_id": ["g1", "g1"], "nflverse_play_id": [1, 2],
+        "n_defense_box": [0, 6], "qb_location": ["0", "S"],
+        "is_motion": [True, False], "n_offense_backfield": [1.0, 1.0],
+        "is_play_action": [False, False], "is_rpo": [False, False],
+        "is_screen_pass": [False, False],
+    })
+    out = merge_ftn(pbp, ftn)
+    assert pd.isna(out.loc[0, "n_defense_box"])     # sentinel -> missing
+    assert out.loc[1, "n_defense_box"] == 6         # real count preserved
+    assert pd.isna(out.loc[0, "qb_location"])
+
+
+def test_ftn_coverage_guard_rejects_a_pre_2022_season():
+    """Training FTN features on a season FTN does not cover must fail loudly.
+
+    Silently defaulting them would make "no motion" a property of 2021 rather
+    than of the play — a feature confounded with season across half of training.
+    """
+    df = pd.DataFrame({
+        "season": [2021] * 50 + [2023] * 50,
+        "play_type": ["pass"] * 100, "epa": [0.0] * 100,
+        "n_defense_box": [np.nan] * 50 + [6.0] * 50,
+    })
+    cfg = {"data": {"use_ftn": True, "holdout_season": 2023, "ftn_min_coverage": 0.8}}
+    with pytest.raises(ValueError, match="2021"):
+        assert_ftn_coverage(df, cfg)
+    # ...and must stay quiet when the seasons are covered.
+    assert_ftn_coverage(df[df.season == 2023], cfg)
+    # ...and be a no-op when FTN is switched off entirely.
+    assert_ftn_coverage(df, {"data": {"use_ftn": False, "holdout_season": 2023}})

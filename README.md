@@ -13,9 +13,12 @@ deliberately-wrong skeleton parts with the right tools: calibrated propensities,
 a doubly-robust off-policy evaluator, a conservative policy, and a sensitivity
 analysis that bounds unobserved confounding.
 
-**Scope:** all downs · one team's defense (SF) · 2021–2023 · **charted
+**Scope:** all downs · one team's defense (SF) · 2022–2024 · **charted
 dropbacks** · **12 actions** = 6 coverage shells {C0, C1, C2, C3, C4, C6} ×
 {blitz, no-blitz}.
+
+The season window starts at 2022 because FTN charting does — see
+[FTN charting](#ftn-charting) below.
 
 The dropback restriction is not incidental, and it is more than a scope note —
 see [What the estimand actually is](#what-the-estimand-actually-is) below.
@@ -24,9 +27,9 @@ see [What the estimand actually is](#what-the-estimand-actually-is) below.
 
 | Step | Component | V2 model |
 |------|-----------|----------|
-| Data | `src/data/` | nflfastR loader + synthetic-SCM generator; 12-action (S, A, R) builder, leak-free confounders + player proxies |
+| Data | `src/data/` | nflfastR + FTN loaders and synthetic-SCM generator; 12-action (S, A, R) builder, leak-free confounders + player proxies |
 | SCM | `src/scm/` | hand-built DAG (`graph.py`) with declared mediator + selection nodes, content-fingerprinted; DoWhy backdoor identification & positivity check (`identify.py`) |
-| πb | `src/models/behavior/` | calibrated LightGBM, cross-fitted around un-splittable classes; ECE + ESS-ratio diagnostics |
+| πb | `src/models/behavior/` | calibrated LightGBM, cross-fitted around un-splittable classes; confidence/classwise ECE + Brier + ESS-ratio diagnostics |
 | Q | `src/models/outcome/` | per-treatment GBM on reward(−EPA), SCM-selected features, out-of-fold path for honest DR |
 | OPE | `src/ope/` | **doubly-robust** policy value (self-normalized, switch-clipped) + DR recovery smoke test; AIPW contrasts (same clipping, reported with support counts); Rosenbaum sensitivity |
 | Policy | `src/policy/` | conservative behavior-regularized (CQL/IQL-style) policy |
@@ -64,7 +67,24 @@ action taxonomy, model hyperparameters, sensitivity γ range).
   absurd (+1.x EPA/play). DR's IPW correction on logged plays pulls estimates
   back to reality; the DR recovery smoke test gates every candidate policy.
 - **Uncalibrated propensities → calibrated LightGBM.** Isotonic calibration with
-  ECE tracked, since miscalibrated propensities silently break inverse-weighting.
+  calibration error tracked, since miscalibrated propensities silently break
+  inverse-weighting.
+
+  Calibration metrics live in `src/models/calibration.py` and are reported as a
+  triple: **confidence ECE** (is the top-class confidence right?), **classwise
+  ECE** (is *every* class's probability right? — the one that matters, since
+  propensities are inverted into weights that use every column), and **Brier**,
+  a proper scoring rule. ECE is never reported alone: it is minimized by a
+  constant base-rate predictor, so on its own it cannot separate "well
+  calibrated" from "uninformative but well calibrated".
+
+  *Correction:* versions before this reported an ECE that binned by the
+  predicted probability of the **true** class while scoring whether the
+  **argmax** was correct. Those are different quantities, and the metric reads
+  ~0.25 on probabilities that are perfectly calibrated by construction. πb's
+  calibration error was reported as 0.238; measured properly it is **0.022**.
+  The model was fine, the ruler was not — and calibration numbers from earlier
+  runs are not comparable to current ones.
 - **Unaddressed confounding → sensitivity analysis.** A Rosenbaum / marginal-
   sensitivity-model bound reports whether the estimated lift survives an
   unobserved confounder of odds-ratio Γ (validated against the synthetic SCM's
@@ -96,6 +116,40 @@ convention:
   deterioration* beyond a configured non-inferiority margin
   (`evaluation.regression_margin`); failing to prove an improvement is an
   acceptable outcome on this data, and `run.py` exits non-zero on a regression.
+
+### FTN charting
+
+`data.use_ftn` merges FTN's play-level charting (2022+, ~99% of scrimmage plays)
+alongside nflfastR. Its columns are split by **when they become knowable**, which
+is a causal distinction rather than a stylistic one:
+
+| FTN column | role | in the adjustment set? |
+|---|---|---|
+| `is_motion`, `n_offense_backfield`, `qb_location` | pre-snap offensive presentation — the defense sees these before calling | **yes** |
+| `n_defense_box` | pre-snap, but a *defensive choice* | **no** — carried only |
+| `is_play_action`, `is_rpo`, `is_screen_pass` | post-snap reveals | **no** — carried only |
+
+`n_defense_box` is the interesting one. It is pre-snap, which makes it look like
+an ideal confounder — but it is part of the defense's own decision, a *sibling*
+of the treatment rather than a cause of it, so adjusting for it would block a
+slice of the effect being estimated. It is carried because it is the only
+defensive attribute charted on ~99% of **all** snaps (runs included, where
+coverage is charted on ~3%), which makes it the primary axis of V3's factored
+action space. The DAG declares it as `def_front`
+(`scm.graph.DEFENSIVE_CHOICE`), and `assert_adjustment_consistency` raises if it
+— or any post-snap flag — turns up among the state features.
+
+Two guards keep this from degrading quietly:
+
+- **`features.assert_ftn_coverage`** refuses to train FTN features on a season
+  FTN does not cover. Without it, a 2021–2023 window would default every 2021
+  row, and the model would learn "no motion" as a property of *2021* rather than
+  of the play — a feature confounded with season across half of training. The
+  V2 window moved to 2022–2024 rather than letting that happen.
+- **Zero-sentinel scrubbing.** FTN writes `0` / `"0"` into `n_defense_box` and
+  `qb_location` where it charts nothing (kickoffs, punts, timeouts, and ~0.2% of
+  scrimmage plays). Zero defenders in the box is not an alignment, so the
+  sentinel becomes `NaN` instead of being read as a count.
 
 ### What the estimand actually is
 

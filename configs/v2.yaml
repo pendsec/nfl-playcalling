@@ -10,7 +10,11 @@ version: v2
 data:
   source: nflfastR            # nflfastR | synthetic
   team: SF                    # defense under study
-  seasons: [2021, 2022, 2023]
+  # FTN charting starts in 2022, and `use_ftn` features would otherwise be
+  # default-valued for every 2021 row — i.e. confounded with season across half
+  # the training set. The window moves rather than the features degrading
+  # silently; `features.assert_ftn_coverage` enforces it.
+  seasons: [2022, 2023, 2024]
   down: all                   # all downs (int to restrict to one down)
   # Charted dropbacks only. The coverage-shell axis comes from nflfastR's
   # `defense_coverage_type`, which is NGS charting on pass plays — runs are
@@ -18,7 +22,15 @@ data:
   # misleading "all snaps" label. Declared here so the restriction is a choice,
   # not a side effect of drop_uncharted_coverage. See features.slice_report.
   play_types: [pass]
-  holdout_season: 2023        # time-aware split: hold out the last season
+
+  # FTN charting (2022+). Adds pre-snap offensive presentation to the adjustment
+  # set (is_motion, n_offense_backfield, qb_location) and carries n_defense_box
+  # — the only defensive attribute charted on ~99% of ALL snaps, runs included —
+  # for the V3 factored action space. Carried, NOT adjusted for: it is a sibling
+  # of the treatment. See scm.graph.DEFENSIVE_CHOICE.
+  use_ftn: true
+  ftn_min_coverage: 0.80      # per-season floor before the run refuses to train
+  holdout_season: 2024        # time-aware split: hold out the last season
   cache_dir: data/raw
   processed_dir: data/processed
 
