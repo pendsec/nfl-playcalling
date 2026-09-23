@@ -1,0 +1,93 @@
+"""
+Off-Policy Evaluation — Doubly-Robust policy value.
+
+The DR estimator combines the Direct Method's plug-in Q with an
+importance-weighted correction on the taken action:
+
+    V_DR(pi) = (1/n) Σ_i Σ_a pi(a|s_i) q(s_i,a)          <- direct method term
+             +  weighted-mean_i [ w_i (r_i - q(s_i,a_i)) ] <- IPW correction
+      with   w_i = pi(a_i|s_i) / pi_b(a_i|s_i)  (clipped).
+
+Doubly robust: consistent if EITHER q OR pi_b is correct. The correction is what
+contains the Direct Method's failure mode — when q extrapolates badly
+off-support, the residual (r - q) on logged plays pulls the estimate back toward
+reality instead of trusting a Q-value no data supports.
+
+Two variance controls:
+  * weight clipping (switch-DR flavor): cap w_i so a single tiny propensity can't
+    dominate — essential here because positivity is weak on rare calls.
+  * self-normalization (SNDR): divide the correction by the mean weight, trading
+    a little bias for much lower variance under poor overlap.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+from ..scm.graph import version_tag
+from ..schemas.ope import OPEResult
+
+
+def dr_per_play(
+    q_all: np.ndarray,
+    pi_b: np.ndarray,
+    policy_probs: np.ndarray,
+    actions: np.ndarray,
+    rewards: np.ndarray,
+    weight_clip: float = 20.0,
+    self_normalize: bool = True,
+) -> np.ndarray:
+    """Per-play DR scores, whose mean is V_DR(pi).
+
+    Exposed separately from `dr_policy_value` because comparing two policies
+    correctly needs their *per-play* scores, not just their means: both policies
+    are scored on the same holdout rows, so the difference is paired and its
+    standard error is far smaller than treating the two estimates as
+    independent. `src.evaluation.version_compare` relies on this.
+    """
+    n = len(rewards)
+    idx = np.arange(n)
+    actions = np.asarray(actions)
+
+    # Direct-method term: expected Q under the target policy, per play.
+    dm = (policy_probs * q_all).sum(axis=1)
+
+    # Importance weights on the taken action, clipped for stability.
+    w = policy_probs[idx, actions] / pi_b[idx, actions]
+    w = np.clip(w, 0.0, weight_clip)
+    residual = rewards - q_all[idx, actions]
+
+    if self_normalize and w.sum() > 0:
+        # SNDR: per-play score with weights normalized to mean 1.
+        w_norm = w * (n / w.sum())
+        return dm + w_norm * residual
+    return dm + w * residual
+
+
+def dr_policy_value(
+    q_all: np.ndarray,
+    pi_b: np.ndarray,
+    policy_probs: np.ndarray,
+    actions: np.ndarray,
+    rewards: np.ndarray,
+    weight_clip: float = 20.0,
+    self_normalize: bool = True,
+    policy_name: str = "unspecified",
+) -> OPEResult:
+    """Doubly-robust value of a (possibly stochastic) policy.
+
+    All array args are aligned by play. q_all / pi_b / policy_probs are
+    (n, n_actions); actions and rewards are length n.
+    """
+    n = len(rewards)
+    per_play = dr_per_play(q_all, pi_b, policy_probs, actions, rewards,
+                           weight_clip=weight_clip, self_normalize=self_normalize)
+
+    return OPEResult(
+        value=float(per_play.mean()),
+        se=float(per_play.std(ddof=1) / np.sqrt(n)),
+        n=n,
+        estimator="DR-SN" if self_normalize else "DR",
+        policy=policy_name,
+        graph_version=version_tag(),
+    )

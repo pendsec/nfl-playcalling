@@ -1,0 +1,108 @@
+# ── V2 — "Right Tools, Simple Problem" ──────────────────────────────────────
+# Scope (per CLAUDE.md): all downs, one team's defense, 3 seasons,
+# 12 actions = 6 coverage shells {C0,C1,C2,C3,C4,C6} x pressure {blitz,no-blitz}.
+# Models: calibrated LightGBM pi_b, per-treatment GBM Q, doubly-robust OPE,
+#         conservative (CQL/IQL-style) policy, Rosenbaum sensitivity analysis.
+# This file is the single source of truth for the V2 run. V1 lives at git tag v1.
+
+version: v2
+
+data:
+  source: nflfastR            # nflfastR | synthetic
+  team: SF                    # defense under study
+  # FTN charting starts in 2022, and `use_ftn` features would otherwise be
+  # default-valued for every 2021 row — i.e. confounded with season across half
+  # the training set. The window moves rather than the features degrading
+  # silently; `features.assert_ftn_coverage` enforces it.
+  seasons: [2022, 2023, 2024]
+  down: all                   # all downs (int to restrict to one down)
+  # Charted dropbacks only. The coverage-shell axis comes from nflfastR's
+  # `defense_coverage_type`, which is NGS charting on pass plays — runs are
+  # charted on ~3% of snaps, so keeping them would add a handful of plays and a
+  # misleading "all snaps" label. Declared here so the restriction is a choice,
+  # not a side effect of drop_uncharted_coverage. See features.slice_report.
+  play_types: [pass]
+
+  # FTN charting (2022+). Adds pre-snap offensive presentation to the adjustment
+  # set (is_motion, n_offense_backfield, qb_location) and carries n_defense_box
+  # — the only defensive attribute charted on ~99% of ALL snaps, runs included —
+  # for the V3 factored action space. Carried, NOT adjusted for: it is a sibling
+  # of the treatment. See scm.graph.DEFENSIVE_CHOICE.
+  use_ftn: true
+  ftn_min_coverage: 0.80      # per-season floor before the run refuses to train
+  holdout_season: 2024        # time-aware split: hold out the last season
+  cache_dir: data/raw
+  processed_dir: data/processed
+
+action:
+  # 12-action space = coverage shell (6) x pressure (blitz / no-blitz).
+  blitz_rusher_threshold: 5   # >= this many pass rushers => blitz
+  # Off-taxonomy coverages (NaN, PREVENT, 2_MAN) are dropped (noisy-label
+  # discipline: inferred coverage treated as latent, not ground truth).
+  drop_uncharted_coverage: true
+
+reward:
+  # Defense wants to minimize offensive EPA, so reward = -EPA (maximize).
+  negate_epa: true
+
+behavior_model:                # pi_b(A|S) — calibrated LightGBM
+  type: lightgbm
+  n_estimators: 300
+  learning_rate: 0.05
+  max_depth: 5
+  min_child_samples: 30
+  subsample: 0.8
+  colsample_bytree: 0.8
+  calibration_folds: 3         # isotonic calibration CV
+  cross_fit_folds: 3           # OOF folds for calibration diagnostics
+
+outcome_model:                 # Q(S, A) = E[R | S, do(A)] — per-treatment GBM
+  type: lightgbm
+  n_estimators: 300
+  learning_rate: 0.05
+  max_depth: 5
+  min_child_samples: 20
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_cell: 20                 # actions with fewer plays fall back to a mean
+  cross_fit_folds: 5           # OOF folds for the DR smoke test on train
+
+policy:                        # conservative (behavior-regularized) policy
+  # Conservatism weight, in units of the fitted Q model's typical WITHIN-STATE
+  # spread (QModel.q_scale) per nat of log-propensity — so alpha is comparable
+  # across fits instead of silently depending on the reward scale. Read it as
+  # "how much within-state Q advantage a call must show to justify one nat of
+  # departure from the DC".
+  #
+  # Chosen on a support criterion, not on the OPE number: at alpha=1.0 the mean
+  # pi_b of the calls pi* recommends (0.220) exceeds the mean pi_b of the DC's
+  # own calls (0.165), and the share of recommendations resting on pi_b < 0.10
+  # falls from 36% (greedy) to 16%. DR value differences across alpha sit well
+  # inside the holdout's noise, so they are not what sets this.
+  alpha: 1.0
+  support_threshold: 0.05      # hard floor: only consider pi_b(a|s) >= this
+
+ope:
+  clip_propensity: [0.01, 0.99]
+  weight_clip: 20.0            # cap on DR importance weights (switch-DR)
+
+sensitivity:
+  gamma_range: [1.0, 1.5, 2.0, 3.0]  # Rosenbaum confounding odds ratios
+
+positivity:
+  min_count: 10               # per-(stratum, action) support threshold
+
+evaluation:                    # policy regression gate (Step 8)
+  # The conservative policy must not be significantly WORSE than the
+  # behavior-constrained greedy baseline on the held-out season, judged by
+  # paired DR. Failing to prove an improvement is fine; proving a deterioration
+  # blocks merge.
+  baseline_name: greedy_baseline
+  candidate_name: conservative_candidate
+  regression_margin: 0.02      # reward(-EPA)/play tolerated before blocking
+
+seed: 42
+
+synthetic:                     # used only when data.source == synthetic
+  n_plays: 9000
+  seed: 7
