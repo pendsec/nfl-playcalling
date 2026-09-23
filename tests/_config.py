@@ -36,3 +36,21 @@ CFG = {
 WEIGHT_CLIP = CFG["ope"]["weight_clip"]
 N_SYNTHETIC_PLAYS = 9000
 SYNTHETIC_SEED = 7
+
+
+# Every-snap (level-1) pipeline: every defense, runs included, personnel package
+# x front, pooled outcome model. Mirrors configs/v3.yaml for the same reason CFG
+# mirrors v2.yaml — assertions run against a known SCM, not a retunable config.
+CFG_L1 = {
+    **CFG,
+    "data": {"team": "all", "down": "all", "holdout_season": 2025,
+             "seasons": [2022, 2023, 2024, 2025], "play_types": ["pass", "run"],
+             "use_ftn": True},
+    "action": {"scheme": "level1",
+               "level1": {"personnel_packages": {"base": [0, 4], "nickel": [5, 5],
+                                                 "dime_plus": [6, 11]},
+                          "front_bins": [5, 6, 7]}},
+    "outcome_model": {**CFG["outcome_model"], "structure": "pooled"},
+}
+N_L1_PLAYS = 9000
+L1_SEED = 11

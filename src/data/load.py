@@ -32,11 +32,15 @@ PBP_COLUMNS = [
     "offense_formation", "offense_personnel",
     "defense_coverage_type", "defense_man_zone_type",
     "number_of_pass_rushers", "defenders_in_box",
+    # Defensive personnel on the field at the snap ("3 CB, 2 DE, ..."). Charted
+    # on ~100% of snaps, runs included, and chosen before the snap — the source
+    # of the personnel-package axis of the level-1 action.
+    "defense_personnel",
     "passer_player_id", "epa",
 ]
 
 # Bump when PBP_COLUMNS changes so stale caches are transparently rebuilt.
-CACHE_VERSION = "v2"
+CACHE_VERSION = "v3"
 
 # ── FTN charting ────────────────────────────────────────────────────────────
 # FTN charts every play, including runs — which nflfastR's NGS coverage columns
@@ -64,6 +68,24 @@ FTN_PRESNAP_DEFENSE = ["n_defense_box"]
 FTN_POSTSNAP = ["is_play_action", "is_rpo", "is_screen_pass"]
 
 FTN_COLUMNS = FTN_PRESNAP_OFFENSE + FTN_PRESNAP_DEFENSE + FTN_POSTSNAP
+
+# ── Post-snap columns: one declaration, enforced everywhere ─────────────────
+# Everything below is knowable only at or after the snap. Some are loaded because
+# they are the ACTION LABEL (coverage, rushers) or the OUTCOME (epa); others are
+# never loaded but sit one line away in nflverse's participation data and look
+# like innocent pre-snap context. None may ever be a state feature or an
+# imputation input — `scm.identify.assert_adjustment_consistency` and
+# `models.imputation.features.FORBIDDEN_FEATURES` both enforce this set.
+POSTSNAP_COLUMNS = frozenset({
+    # participation / NGS, measured as the play unfolds
+    "time_to_throw", "was_pressure", "route",
+    # post-snap action labels: the coverage as PLAYED, the rushers who ACTUALLY rushed
+    "defense_coverage_type", "defense_man_zone_type", "number_of_pass_rushers",
+    # FTN reveals
+    *FTN_POSTSNAP,
+    # the outcome, and the offense's run/pass choice
+    "epa", "play_type", "play_type_nfl",
+})
 FTN_JOIN_KEYS = ["nflverse_game_id", "nflverse_play_id"]
 
 # FTN fills these with a literal zero / "0" on non-scrimmage plays (kicks,
@@ -362,6 +384,166 @@ def true_policy_value(df: pd.DataFrame, actions: np.ndarray) -> float:
         (coverage_reward + blitz_reward
          + df["_qb_term"].to_numpy() + df["_base"].to_numpy()).mean()
     )
+
+
+# ── Synthetic SCM: personnel package x front, every snap ────────────────────
+# Heaviness of an alignment on a 0..5 scale: base personnel with 8+ in the box is
+# 5, dime personnel with <=5 in the box is 0. The known structure:
+#
+#   * the offense runs more in short-yardage / under-center / run-leaning states;
+#   * DETERRENCE — a heavier alignment lowers the chance the offense runs at all;
+#   * a heavy alignment is good against the run and bad against the pass;
+#   * the DC's hidden read favours heavier calls AND improves the outcome, which
+#     is the confounding the sensitivity analysis exists to bound.
+#
+# So the causal-best alignment rises with how run-likely the state is, but not
+# one-for-one: loading up also pushes the offense toward the pass it is weak
+# against. The value of a call is the mixture over the offense's response, which
+# is exactly the estimand the every-snap pipeline targets.
+_SYN_PERSONNEL = {
+    0: "2 CB, 2 DE, 2 DT, 1 FS, 3 ILB, 1 SS",   # base: 4 DB
+    1: "3 CB, 2 DE, 2 DT, 1 FS, 2 ILB, 1 SS",   # nickel: 5 DB
+    2: "4 CB, 2 DE, 2 DT, 1 FS, 1 ILB, 1 SS",   # dime+: 6 DB
+}
+_ALIGN_RUN_GAIN = 0.12      # reward per unit heaviness when the offense runs
+_ALIGN_PASS_COST = -0.08    # ... and when it passes
+_DETERRENCE = 0.30          # logit drop in P(run) per unit heaviness
+
+
+def alignment_heaviness(actions: np.ndarray) -> np.ndarray:
+    """0 (dime, light box) .. 5 (base, 8+ box) for level-1 action ids."""
+    actions = np.asarray(actions)
+    package, front = actions // 4, actions % 4
+    return (2 - package) + front
+
+
+def _alignment_components(heavy: np.ndarray, p_run_logit: np.ndarray):
+    """P(run | do(alignment)) and the branch rewards — shared by the generator
+    and the ground-truth value so the two can never disagree."""
+    centred = heavy - 2.5
+    p_run = _sigmoid(p_run_logit - _DETERRENCE * centred)
+    return p_run, _ALIGN_RUN_GAIN * centred, _ALIGN_PASS_COST * centred
+
+
+def generate_synthetic_alignment(
+    n_plays: int = 12000, seed: int = 11, seasons: list[int] | None = None,
+    n_teams: int = 8, conf_strength: float = CONF_STRENGTH,
+) -> pd.DataFrame:
+    """Simulate every-snap play-by-play from a known alignment SCM.
+
+    Emits nflfastR/FTN-shaped columns so `build_dataset` consumes it unchanged,
+    including the quirk that `passer_player_id` exists only on pass plays — the
+    pipeline has to handle it here exactly as it does on real data.
+    `conf_strength = 0` removes the hidden read's effect on the outcome, so the
+    OPE machinery should then recover the TRUE value of a policy, not just the
+    empirical mean.
+    """
+    rng = np.random.default_rng(seed)
+    seasons = list(seasons) if seasons else [2022, 2023, 2024, 2025]
+    n = n_plays
+    plays_per_game = 60
+    n_games = n // plays_per_game + 1
+
+    # Game-level: season, week, and which defense faces which offense.
+    g_season = rng.choice(seasons, n_games)
+    g_week = rng.integers(1, 18, n_games)
+    g_def = rng.integers(0, n_teams, n_games)
+    g_off = (g_def + rng.integers(1, n_teams, n_games)) % n_teams
+    game = np.repeat(np.arange(n_games), plays_per_game)[:n]
+
+    team_run_lean = rng.normal(0, 0.4, n_teams)        # offense identity
+    team_qb_skill = rng.normal(0, 1, n_teams)          # offense's QB
+    team_heavy_bias = rng.normal(0, 0.6, n_teams)      # defense's scheme
+    defteam, posteam = g_def[game], g_off[game]
+
+    # ── Pre-snap state ───────────────────────────────────────────────────────
+    down = rng.integers(1, 5, n).astype(float)
+    ydstogo = rng.integers(1, 20, n).astype(float)
+    yardline_100 = rng.integers(1, 99, n).astype(float)
+    score_diff = rng.normal(0, 10, n).round()
+    game_seconds_remaining = rng.integers(0, 3600, n).astype(float)
+    shotgun = (rng.random(n) < np.clip(0.25 + 0.035 * ydstogo, 0, 0.95)).astype(int)
+    is_motion = (rng.random(n) < 0.4).astype(int)
+    n_backfield = np.where(shotgun == 1, 1.0, rng.choice([1.0, 2.0], n, p=[0.6, 0.4]))
+
+    p_run_logit = (0.6 - 0.22 * (ydstogo - 5) + 0.9 * (1 - shotgun)
+                   + team_run_lean[posteam])
+    coach_read = rng.normal(0, 1, n)                   # hidden, never recorded
+
+    # ── Behavior: the DC's alignment call ────────────────────────────────────
+    ideal = 5.0 * _sigmoid(p_run_logit)
+    heavy_all = alignment_heaviness(np.arange(12))[None, :]
+    logits = (-0.6 * (heavy_all - ideal[:, None] - team_heavy_bias[defteam][:, None]) ** 2
+              + 0.30 * coach_read[:, None] * (heavy_all - 2.5) / 2.5)
+    logits -= logits.max(axis=1, keepdims=True)
+    p = np.exp(logits)
+    p /= p.sum(axis=1, keepdims=True)
+    action = (rng.random(n)[:, None] > np.cumsum(p, axis=1)).sum(axis=1).clip(0, 11)
+    heavy = alignment_heaviness(action)
+
+    # ── The offense responds to the look, then the play resolves ─────────────
+    p_run, r_run, r_pass = _alignment_components(heavy, p_run_logit)
+    is_run = rng.random(n) < p_run
+    qb_term = -0.10 * team_qb_skill[posteam]
+    base = 0.02 * (ydstogo - 7) / 5.0 - 0.01 * (yardline_100 - 50) / 50.0
+    reward = (np.where(is_run, r_run, r_pass) + base + qb_term
+              + conf_strength * coach_read + rng.normal(0, 0.6, n))
+
+    package, front = action // 4, action % 4
+    box = np.select([front == 0, front == 1, front == 2],
+                    [rng.choice([4, 5], n), 6, 7], rng.choice([8, 9], n))
+    teams = np.array([f"T{i}" for i in range(n_teams)])
+    shells = np.array(COVERAGE_SHELLS)[rng.integers(0, N_SHELLS, n)]
+
+    return pd.DataFrame({
+        "game_id": np.array([f"G{g}" for g in game]),
+        "play_id": np.arange(n),
+        "season": g_season[game], "week": g_week[game],
+        "defteam": teams[defteam], "posteam": teams[posteam],
+        "down": down, "ydstogo": ydstogo, "yardline_100": yardline_100,
+        "qtr": np.clip((3600 - game_seconds_remaining) // 900 + 1, 1, 4),
+        "game_seconds_remaining": game_seconds_remaining,
+        "half_seconds_remaining": game_seconds_remaining % 1800,
+        "score_differential": score_diff,
+        "posteam_timeouts_remaining": 3, "defteam_timeouts_remaining": 3,
+        "shotgun": shotgun, "no_huddle": 0,
+        "play_type": np.where(is_run, "run", "pass"),
+        "play_type_nfl": np.where(is_run, "RUSH", "PASS"),
+        "offense_formation": np.where(shotgun == 1, "SHOTGUN", "UNDER_CENTER"),
+        "offense_personnel": "1 RB, 1 TE, 3 WR",
+        "defense_personnel": np.vectorize(_SYN_PERSONNEL.get)(package),
+        "defense_coverage_type": np.where(is_run, None, shells),
+        "defense_man_zone_type": None,
+        "number_of_pass_rushers": np.where(is_run, np.nan, rng.choice([4.0, 5.0], n)),
+        "defenders_in_box": box,
+        # Only on passes, as in nflfastR.
+        "passer_player_id": np.where(is_run, None, np.array([f"QB_{t}" for t in teams[posteam]])),
+        "epa": -reward,
+        "n_defense_box": box.astype(float),
+        "is_motion": is_motion.astype(bool),
+        "n_offense_backfield": n_backfield,
+        "qb_location": np.where(shotgun == 1, "S", "U"),
+        "is_play_action": False, "is_rpo": False, "is_screen_pass": False,
+        # Ground truth (any "_" column survives build_dataset; never a feature).
+        "_coach_read": coach_read,
+        "_p_run_logit": p_run_logit,
+        "_qb_term": qb_term,
+        "_base": base,
+    })
+
+
+def true_alignment_value(df: pd.DataFrame, actions: np.ndarray) -> float:
+    """Ground-truth value of a level-1 policy on `generate_synthetic_alignment` data.
+
+    Under do(alignment) the hidden read sits at its mean (0), and the offense's
+    run/pass choice RESPONDS to the intervened alignment — so the value is the
+    mixture over that response, including deterrence. `actions` is one level-1
+    action id per row of `df`.
+    """
+    heavy = alignment_heaviness(actions)
+    p_run, r_run, r_pass = _alignment_components(heavy, df["_p_run_logit"].to_numpy())
+    branch = p_run * r_run + (1 - p_run) * r_pass
+    return float((branch + df["_qb_term"].to_numpy() + df["_base"].to_numpy()).mean())
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:

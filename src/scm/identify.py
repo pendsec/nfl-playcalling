@@ -31,31 +31,43 @@ import numpy as np
 import pandas as pd
 
 from . import graph as scm
+from .dag import CausalGraph
+from ..data.load import POSTSNAP_COLUMNS
 from ..schemas.dataset import Dataset
 
 
-def assert_adjustment_consistency(ds: Dataset) -> list[str]:
+def assert_adjustment_consistency(ds: Dataset, graph: CausalGraph | None = None) -> list[str]:
     """Confirm the SCM adjustment columns exist in the data and no mediator leaks.
 
     Returns the adjustment columns actually present. Raises if the SCM declares a
-    confounder the data layer never built, or if a post-snap mediator appears in
-    the state — either is a causal-discipline violation, not a silent mismatch.
+    confounder the data layer never built, or if a post-snap column, a mediator,
+    a selection variable, a sibling of the treatment, or the treatment itself
+    appears in the state — each is a causal-discipline violation, not a silent
+    mismatch. `graph` defaults to the shell x pressure graph.
     """
-    declared = scm.adjustment_columns()
+    graph = graph or scm.SHELL_PRESSURE_GRAPH
+    declared = graph.adjustment_columns()
     missing = [c for c in declared if c not in ds.df.columns]
     if missing:
         raise ValueError(
             f"SCM declares adjustment columns absent from the data: {missing}. "
             "graph.CONFOUNDER_COLUMNS and the data-layer state features disagree."
         )
-    leaked = [m for m in scm.MEDIATORS if m in ds.state_cols]
+    postsnap = sorted(c for c in ds.state_cols if c in POSTSNAP_COLUMNS)
+    if postsnap:
+        raise ValueError(
+            f"Post-snap column(s) in the state: {postsnap}. Only information "
+            "available before the snap may condition a model — any post-snap "
+            "leakage invalidates the entire pipeline."
+        )
+    leaked = [m for m in graph.mediators if m in ds.state_cols]
     if leaked:
         raise ValueError(f"Post-snap mediator(s) leaked into the state: {leaked}")
     # Every modelled row has the selection indicator = 1 by construction, so as a
     # feature it is a constant that silently reads as "no assumption made". The
     # assumption belongs in the graph and the limitations section, not the design
     # matrix.
-    selected = [c for c in scm.SELECTION if c in ds.state_cols]
+    selected = [c for c in graph.selection if c in ds.state_cols]
     if selected:
         raise ValueError(
             f"Selection variable(s) used as state features: {selected}. The sample "
@@ -64,13 +76,21 @@ def assert_adjustment_consistency(ds: Dataset) -> list[str]:
     # Box count is pre-snap, which makes it look like a perfectly good
     # confounder. It is not: it is part of the defense's own decision, so
     # adjusting for it would block a slice of the effect being estimated.
-    own_choice = [c for cols in scm.DEF_CHOICE_COLUMNS.values() for c in cols
+    own_choice = [c for cols in graph.def_choice_columns.values() for c in cols
                   if c in ds.state_cols]
     if own_choice:
         raise ValueError(
             f"Defensive-choice column(s) used as state features: {own_choice}. "
             "These are siblings of the treatment, not causes of it — see "
             "scm.graph.DEFENSIVE_CHOICE."
+        )
+    # A model conditioned on the action it is estimating the effect of learns
+    # nothing about that effect.
+    is_treatment = sorted(c for c in graph.treatment_columns if c in ds.state_cols)
+    if is_treatment:
+        raise ValueError(
+            f"Treatment column(s) used as state features: {is_treatment}. These "
+            f"ARE the action ({graph.treatment}); they cannot also condition it."
         )
     # State and adjustment set must be the same thing by construction.
     extra = set(ds.state_cols) - set(declared)
@@ -81,11 +101,12 @@ def assert_adjustment_consistency(ds: Dataset) -> list[str]:
     return declared
 
 
-def build_causal_model(ds: Dataset, outcome_col: str = "reward"):
-    """Build a DoWhy CausalModel for def_playcall -> outcome given the SCM."""
+def build_causal_model(ds: Dataset, outcome_col: str = "reward",
+                       graph: CausalGraph | None = None):
+    """Build a DoWhy CausalModel for treatment -> outcome given the SCM."""
     from dowhy import CausalModel
 
-    common_causes = assert_adjustment_consistency(ds)
+    common_causes = assert_adjustment_consistency(ds, graph)
     return CausalModel(
         data=ds.df,
         treatment=ds.action_col,
@@ -166,7 +187,7 @@ def is_action_observed(ds: Dataset, action: int, down: int) -> bool:
     return bool((ds.df.loc[m, ds.action_col] == action).any())
 
 
-def visualize_dag(save_path: str) -> None:
+def visualize_dag(save_path: str, graph: CausalGraph | None = None) -> None:
     """Draw the abstract SCM DAG with networkx (dev artifact)."""
     import matplotlib
     matplotlib.use("Agg")
@@ -174,13 +195,14 @@ def visualize_dag(save_path: str) -> None:
     import networkx as nx
 
     g = nx.DiGraph()
-    g.add_edges_from(scm.EDGES)
-    color = {n: ("#D0021B" if n == scm.TREATMENT else
-                 "#2C3E50" if n == scm.OUTCOME else
-                 "#9B59B6" if n in scm.UNOBSERVED else
-                 "#E87040" if n in scm.MEDIATORS else
-                 "#7F8C8D" if n in scm.SELECTION else
-                 "#C0553B" if n in scm.DEFENSIVE_CHOICE else "#4A90D9")
+    graph = graph or scm.SHELL_PRESSURE_GRAPH
+    g.add_edges_from(graph.edges)
+    color = {n: ("#D0021B" if n == graph.treatment else
+                 "#2C3E50" if n == graph.outcome else
+                 "#9B59B6" if n in graph.unobserved else
+                 "#E87040" if n in graph.mediators else
+                 "#7F8C8D" if n in graph.selection else
+                 "#C0553B" if n in graph.defensive_choice else "#4A90D9")
              for n in g.nodes()}
     fig, ax = plt.subplots(figsize=(11, 8))
     pos = nx.spring_layout(g, seed=1)

@@ -10,6 +10,8 @@ Usage:
     python run.py                          # uses configs/v2.yaml (real SF data)
     python run.py --config configs/v2.yaml
     python run.py --source synthetic       # known-SCM data, no network
+    python run.py --config configs/v3.yaml # every defense, every snap:
+                                           # personnel package x front
 """
 
 from __future__ import annotations
@@ -29,14 +31,16 @@ logging.disable(logging.WARNING)  # quiet DoWhy / LightGBM chatter
 from src.scm import graph as scm
 from src.scm import identify
 from src.data.load import (load_pbp, load_ftn, merge_ftn, ftn_coverage,
+                           generate_synthetic_alignment,
                            generate_synthetic, true_policy_value)
-from src.data.features import (assert_ftn_coverage, build_dataset,
+from src.data.features import (action_scheme, assert_ftn_coverage, build_dataset,
                                slice_report, time_aware_split)
 from src.models.behavior.propensity import fit_behavior_model
 from src.models.outcome.q_model import fit_q_model, crossfit_q
 from src.ope.direct_method import behavior_recovery_check, dm_policy_value
 from src.ope.doubly_robust import dr_policy_value
 from src.ope.aipw import aipw_contrasts
+from src.ope.ladder import ope_ladder
 from src.ope.sensitivity import sensitivity_bounds, attach as attach_sensitivity
 from src.policy.conservative import learn_conservative_policy
 from src.evaluation import compare_to_baseline
@@ -57,13 +61,23 @@ def main(config_path: str, source_override: str | None) -> None:
         cfg["data"]["source"] = source_override
     np.random.seed(cfg["seed"])
     weight_clip = cfg["ope"].get("weight_clip", 20.0)
+    # The graph is fixed by what the action IS; every estimate below is stamped
+    # with its version so a saved number can't drift from the graph it assumed.
+    graph = scm.graph_for(cfg)
+    gv = graph.version_tag()
+    every_snap = action_scheme(cfg) == "level1"
 
     # ── 1. Data ──────────────────────────────────────────────────────────────
     _rule("[1/7] Data layer")
     if cfg["data"]["source"] == "synthetic":
-        pbp = generate_synthetic(cfg["synthetic"]["n_plays"], cfg["synthetic"]["seed"],
-                                 seasons=cfg["data"]["seasons"])
-        cfg["data"]["team"] = "SYN"
+        if every_snap:
+            pbp = generate_synthetic_alignment(cfg["synthetic"]["n_plays"],
+                                               cfg["synthetic"]["seed"],
+                                               seasons=cfg["data"]["seasons"])
+        else:
+            pbp = generate_synthetic(cfg["synthetic"]["n_plays"], cfg["synthetic"]["seed"],
+                                     seasons=cfg["data"]["seasons"])
+            cfg["data"]["team"] = "SYN"
         print(f"  synthetic SCM: {len(pbp):,} plays")
     else:
         pbp = load_pbp(cfg["data"]["seasons"], cfg["data"]["cache_dir"])
@@ -88,12 +102,13 @@ def main(config_path: str, source_override: str | None) -> None:
               f"  -> {verdict}")
 
     ds = build_dataset(pbp, cfg)
-    print(f"  slice ({cfg['data']['team']}, down={cfg['data']['down']}, "
+    who = "all defenses" if cfg["data"]["team"] in (None, "all") else cfg["data"]["team"]
+    print(f"  slice ({who}, down={cfg['data']['down']}, "
           f"{'/'.join(cfg['data'].get('play_types', ['pass', 'run']))}): "
           f"{len(ds.df):,} plays, {ds.n_actions} actions")
     for a, label in ds.action_labels.items():
         n = int((ds.df[ds.action_col] == a).sum())
-        print(f"    {a:2d} {label:<16} {n:>5}  ({n/len(ds.df):.1%})")
+        print(f"    {a:2d} {label:<18} {n:>6,}  ({n/len(ds.df):.1%})")
 
     train, test = time_aware_split(ds, cfg["data"]["holdout_season"])
     print(f"  split: train={len(train.df):,} (<{cfg['data']['holdout_season']}) "
@@ -101,8 +116,8 @@ def main(config_path: str, source_override: str | None) -> None:
 
     # ── 2. Causal graph + identification ─────────────────────────────────────
     _rule("[2/7] SCM identification + positivity")
-    print(scm.describe())
-    model = identify.build_causal_model(train)
+    print(graph.describe())
+    model = identify.build_causal_model(train, graph=graph)
     est = identify.identify_estimand(model)
     bd = est.get_backdoor_variables() if hasattr(est, "get_backdoor_variables") else []
     print(f"  DoWhy: backdoor-identified via {len(bd)} adjustment variables")
@@ -144,7 +159,8 @@ def main(config_path: str, source_override: str | None) -> None:
     # ── 5. OPE smoke test (doubly robust) ────────────────────────────────────
     _rule("[5/7] OPE — DR behavior-recovery smoke test (train, cross-fit Q)")
     mu_train = crossfit_q(train, cfg)
-    rec = behavior_recovery_check(train, q, beh, q_all=mu_train, weight_clip=weight_clip)
+    rec = behavior_recovery_check(train, q, beh, q_all=mu_train, weight_clip=weight_clip,
+                                  graph_version=gv)
     print(f"  empirical reward : {rec['empirical_reward']:+.4f} "
           f"(+/- {rec['empirical_se']:.4f})")
     print(f"  DM under pi_b    : {rec['dm_under_pi_b']:+.4f}")
@@ -162,9 +178,9 @@ def main(config_path: str, source_override: str | None) -> None:
     pib_te = beh.propensity(test.df)
 
     v_behavior = dr_policy_value(q_te, pib_te, pib_te, a_te, r_te, weight_clip,
-                                 policy_name="behavior")
+                                 policy_name="behavior", graph_version=gv)
     v_policy = dr_policy_value(q_te, pib_te, out["policy_probs"], a_te, r_te, weight_clip,
-                               policy_name="conservative")
+                               policy_name="conservative", graph_version=gv)
     print(f"  V_DR(pi_b) on holdout: {v_behavior.value:+.4f}  "
           f"95% CI [{v_behavior.ci95[0]:+.4f}, {v_behavior.ci95[1]:+.4f}]")
     print(f"  V_DR(pi*)  on holdout: {v_policy.value:+.4f}  "
@@ -183,6 +199,22 @@ def main(config_path: str, source_override: str | None) -> None:
           f"(DC's own calls: {pib_te[idx, a_te].mean():.3f}); "
           f"{float((pib_chosen < 0.10).mean()):.1%} rest on pi_b < 0.10")
 
+    # The ladder: the same policy under every estimator. DM trusts Q, IPW trusts
+    # pi_b, DR needs only one of them — agreement is the thing to look for.
+    ladder = pd.concat([
+        ope_ladder(q_te, pib_te, pib_te, a_te, r_te, weight_clip,
+                   policy_name="behavior", graph_version=gv),
+        ope_ladder(q_te, pib_te, out["policy_probs"], a_te, r_te, weight_clip,
+                   policy_name="conservative", graph_version=gv),
+    ], ignore_index=True)
+    print("\n  DM -> IPW -> DR ladder on holdout:")
+    for pol, grp in ladder.groupby("policy", sort=False):
+        cells = "  ".join(f"{r.estimator} {r.value:+.4f}" for r in grp.itertuples())
+        g0 = grp.iloc[0]
+        print(f"    {pol:<13} {cells}")
+        print(f"    {'':<13} weights rest on {g0.support_share:.1%} of plays, "
+              f"ESS {g0.ess_ratio:.1%}, {g0.share_clipped:.1%} clipped")
+
     print("\n  Sensitivity to unobserved confounding (does the lift survive?):")
     sens = sensitivity_bounds(q_te, pib_te, out["policy_probs"], a_te, r_te,
                               cfg["sensitivity"]["gamma_range"], weight_clip,
@@ -199,8 +231,10 @@ def main(config_path: str, source_override: str | None) -> None:
     # Same weight clip as DR: a fixed-action contrast rests entirely on the
     # plays that took that action, so it is *more* exposed to a tiny
     # propensity than a policy value is, not less.
+    by_label = {v: k for k, v in ds.action_labels.items()}
+    baseline = by_label.get(cfg["ope"].get("aipw_baseline"), 0)
     contrasts = aipw_contrasts(q_te, pib_te, a_te, r_te, ds.action_labels,
-                               baseline=0, weight_clip=weight_clip)
+                               baseline=baseline, weight_clip=weight_clip)
 
     # ── 7. Policy regression gate ────────────────────────────────────────────
     _rule("[7/7] Regression gate — candidate policy vs baseline on the holdout season")
@@ -208,47 +242,63 @@ def main(config_path: str, source_override: str | None) -> None:
     print(cmp.report())
 
     _example_recommendations(ds, test, policy)
-    _save_outputs(ds, q_all_train, v_behavior, v_policy, sens, contrasts, cmp)
+    _save_outputs(cfg, ds, q_all_train, v_behavior, v_policy, sens, contrasts, cmp, ladder)
 
     if cmp.regressed:
         # CLAUDE.md: "Regressions block merge." Exit non-zero so CI fails.
         raise SystemExit(1)
 
 
+# Named situations rather than random rows: the recommendations a coordinator
+# most needs help with are the ones a dropback-only sample cannot see at all.
+_SITUATIONS = [
+    ("3rd/4th & short", lambda d: (d["down"] >= 3) & (d["ydstogo"] <= 2)),
+    ("goal-to-go inside the 5", lambda d: d["yardline_100"] <= 5),
+    ("1st & 10", lambda d: (d["down"] == 1) & (d["ydstogo"] == 10)),
+    ("3rd & long", lambda d: (d["down"] == 3) & (d["ydstogo"] >= 8)),
+]
+
+
 def _example_recommendations(ds, test, policy) -> None:
     _rule("Example recommendations (holdout states)")
-    sample = test.df.sample(min(4, len(test.df)), random_state=0).index
-    for i in sample:
+    for name, where in _SITUATIONS:
+        pool = test.df[where(test.df)]
+        if pool.empty:
+            continue
+        i = pool.sample(1, random_state=0).index[0]
         row = test.df.loc[[i]]
         res = policy.act(row)
         a = int(res["chosen"][0])
         q_all = res["q_all"][0]
         supported = [ds.action_labels[j] for j in range(ds.n_actions) if res["support"][0, j]]
         s = test.df.loc[i]
-        print(f"\n  {int(s['down'])} & {s['ydstogo']:.0f} | {s['formation']} | "
+        print(f"\n  {name}: {int(s['down'])} & {s['ydstogo']:.0f} | {s['formation']} | "
               f"ball on {100 - s['yardline_100']:.0f} | score {s['score_diff']:+.0f}")
         print(f"    -> recommend: {ds.action_labels[a]}  (Q={q_all[a]:+.3f})")
         print(f"       DC actually called: {ds.action_labels[int(s['action'])]}")
         print(f"       supported calls here ({len(supported)}): {', '.join(supported)}")
 
 
-def _save_outputs(ds, q_all_train, v_behavior, v_policy, sens, contrasts, cmp) -> None:
-    os.makedirs("outputs", exist_ok=True)
+def _save_outputs(cfg, ds, q_all_train, v_behavior, v_policy, sens, contrasts,
+                  cmp, ladder) -> None:
+    out_dir = cfg.get("output_dir", "outputs")
+    os.makedirs(out_dir, exist_ok=True)
     pd.DataFrame({
         "action": list(ds.action_labels.values()),
         "mean_Q_train": q_all_train.mean(axis=0),
-    }).to_csv("outputs/q_by_action.csv", index=False)
+    }).to_csv(f"{out_dir}/q_by_action.csv", index=False)
     # One self-describing row per estimate: point value, CI, n, estimator,
     # graph version, and whether a sensitivity bound backs it (CLAUDE.md:
     # "every OPE estimate ships with ... the assumed causal graph version").
     pd.DataFrame([
         v_behavior.to_record(),
         v_policy.to_record(),
-    ]).to_csv("outputs/ope_policy_values.csv", index=False)
-    sens.to_csv("outputs/sensitivity.csv", index=False)
-    contrasts.to_csv("outputs/aipw_contrasts.csv", index=False)
-    pd.DataFrame([cmp.to_record()]).to_csv("outputs/version_comparison.csv", index=False)
-    print("\n  saved: outputs/{q_by_action,ope_policy_values,sensitivity,"
+    ]).to_csv(f"{out_dir}/ope_policy_values.csv", index=False)
+    ladder.to_csv(f"{out_dir}/ope_ladder.csv", index=False)
+    sens.to_csv(f"{out_dir}/sensitivity.csv", index=False)
+    contrasts.to_csv(f"{out_dir}/aipw_contrasts.csv", index=False)
+    pd.DataFrame([cmp.to_record()]).to_csv(f"{out_dir}/version_comparison.csv", index=False)
+    print(f"\n  saved: {out_dir}/{{q_by_action,ope_policy_values,ope_ladder,sensitivity,"
           "aipw_contrasts,version_comparison}.csv")
 
 

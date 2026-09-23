@@ -45,16 +45,15 @@ from __future__ import annotations
 
 import pandas as pd
 
-from ...data.load import COVERAGE_SHELLS, N_SHELLS
+from ...data.load import COVERAGE_SHELLS, N_SHELLS, POSTSNAP_COLUMNS
 
 # Pre-snap only. Anything realized at or after the snap is barred — including
 # the reward: the imputed variable IS the treatment whose effect on the reward
 # is estimated downstream, so conditioning the imputer on the reward would let
 # it write in the very association the study is trying to measure.
 FORBIDDEN_FEATURES = {
-    "epa", "reward", "action", "action_label", "shell", "play_type",
-    "is_play_action", "is_rpo", "is_screen_pass", "off_playcall",
-}
+    "reward", "action", "action_label", "shell", "off_playcall",
+} | POSTSNAP_COLUMNS
 
 # Game situation — nflfastR play-by-play.
 IMPUTER_SITUATION = ["down", "ydstogo", "yardline_100", "score_diff", "qtr"]

@@ -268,6 +268,31 @@ It runs the story on real SF data with a synthetic ground-truth validation aside
 All scope lives in [`configs/v2.yaml`](configs/v2.yaml) (team, seasons,
 action taxonomy, model hyperparameters, sensitivity γ range).
 
+#### Every defense, every snap
+
+A second pipeline widens the lens to all 32 defenses and every snap, runs
+included, and recommends the **alignment** a defense shows before the snap —
+personnel package (base / nickel / dime) × how many defenders stand in the box.
+Both halves are chosen pre-snap and charted on ~100% of plays, so short yardage
+and the goal line are in the data, and the offense's run/pass *response* to the
+look is inside the estimate rather than selected away.
+
+```bash
+python run.py --config configs/v3.yaml                     # 2022–24 train, 2025 held out
+python run.py --config configs/v3.yaml --source synthetic  # known-SCM alignment league
+```
+
+Its walkthrough is
+[`notebooks/v3_pipeline_walkthrough.ipynb`](notebooks/v3_pipeline_walkthrough.ipynb).
+Headline so far: the recommended alignment policy is **statistically
+indistinguishable from what coordinators actually call** on the held-out season
+(DR lift +0.001 reward/snap, each value ±0.02), and the ladder of estimators —
+DM, IPW, SNIPW, DR — agrees, so that is a real null rather than a broken
+estimator. The personnel-package effect behaves like a cause (base helps in run
+situations, dime on third-and-long); the box-count effect does not yet — it is
+largest on passing downs, which points at the pressure call rather than run
+fits. The coverage-and-pressure call given the alignment is not modeled yet.
+
 ### Design decisions, and the failure each one prevents
 
 - **Doubly-robust OPE, not the Direct Method.** A plug-in Q model asked to score

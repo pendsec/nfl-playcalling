@@ -73,11 +73,14 @@ def dr_policy_value(
     weight_clip: float = 20.0,
     self_normalize: bool = True,
     policy_name: str = "unspecified",
+    graph_version: str | None = None,
 ) -> OPEResult:
     """Doubly-robust value of a (possibly stochastic) policy.
 
     All array args are aligned by play. q_all / pi_b / policy_probs are
-    (n, n_actions); actions and rewards are length n.
+    (n, n_actions); actions and rewards are length n. Pass `graph_version` from
+    the graph the models were fit under (`scm.graph_for(cfg).version_tag()`);
+    it defaults to the shell x pressure graph.
     """
     n = len(rewards)
     per_play = dr_per_play(q_all, pi_b, policy_probs, actions, rewards,
@@ -89,5 +92,5 @@ def dr_policy_value(
         n=n,
         estimator="DR-SN" if self_normalize else "DR",
         policy=policy_name,
-        graph_version=version_tag(),
+        graph_version=graph_version or version_tag(),
     )

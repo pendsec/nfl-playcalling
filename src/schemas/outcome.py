@@ -57,3 +57,35 @@ class QModel:
         """Q(s, a) only for the action actually taken in each row."""
         q_all = self.predict_all_actions(df)
         return q_all[np.arange(len(df)), np.asarray(actions)]
+
+
+@dataclass
+class PooledQModel:
+    """One regressor over (state, action features) rather than one per action.
+
+    The action enters as a small feature vector — for the every-snap scheme,
+    (package, front) — so the model shares strength across action cells: a
+    rarely-called alignment borrows from every alignment that shares its package
+    and every one that shares its front. Scoring the counterfactual is then a
+    matter of swapping the action features and re-predicting.
+
+    Same interface as `QModel`, so policies and OPE take either.
+    """
+    prep: ColumnTransformer
+    regressor: object
+    action_features: np.ndarray     # (n_actions, k): the features for action a
+    n_actions: int
+    state_cols: list[str]
+    q_scale: float = 1.0
+
+    def predict_all_actions(self, df: pd.DataFrame) -> np.ndarray:
+        phi = self.prep.transform(df[self.state_cols])
+        n = phi.shape[0]
+        return np.column_stack([
+            self.regressor.predict(np.hstack([phi, np.tile(self.action_features[a], (n, 1))]))
+            for a in range(self.n_actions)
+        ])
+
+    def predict_taken(self, df: pd.DataFrame, actions: np.ndarray) -> np.ndarray:
+        q_all = self.predict_all_actions(df)
+        return q_all[np.arange(len(df)), np.asarray(actions)]

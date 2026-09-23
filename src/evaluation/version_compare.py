@@ -38,6 +38,7 @@ from ..schemas.behavior import BehaviorModel
 from ..schemas.outcome import QModel
 from ..schemas.ope import OPEResult
 from ..ope.doubly_robust import dr_per_play, dr_policy_value
+from ..scm.graph import graph_for
 
 
 @dataclass
@@ -122,6 +123,7 @@ def compare_policies(
     margin: float = 0.02,
     baseline_name: str = "greedy_baseline",
     candidate_name: str = "conservative_candidate",
+    graph_version: str | None = None,
 ) -> VersionComparison:
     """Score two policies by DR on the same holdout rows and gate on the diff.
 
@@ -153,9 +155,11 @@ def compare_policies(
         baseline_name=baseline_name,
         candidate_name=candidate_name,
         baseline=dr_policy_value(q_all, pi_b, baseline_probs, actions, rewards,
-                                 weight_clip=weight_clip, policy_name=baseline_name),
+                                 weight_clip=weight_clip, policy_name=baseline_name,
+                                 graph_version=graph_version),
         candidate=dr_policy_value(q_all, pi_b, candidate_probs, actions, rewards,
-                                  weight_clip=weight_clip, policy_name=candidate_name),
+                                  weight_clip=weight_clip, policy_name=candidate_name,
+                                  graph_version=graph_version),
         diff=float(delta.mean()),
         diff_se=diff_se,
         margin=margin,
@@ -188,6 +192,7 @@ def compare_to_baseline(
         baseline_probs=baseline.act(test.df)["policy_probs"],
         candidate_probs=candidate.act(test.df)["policy_probs"],
         weight_clip=cfg["ope"].get("weight_clip", 20.0),
+        graph_version=graph_for(cfg).version_tag(),
         margin=ecfg.get("regression_margin", 0.02),
         baseline_name=ecfg.get("baseline_name", "greedy_baseline"),
         candidate_name=ecfg.get("candidate_name", "conservative_candidate"),

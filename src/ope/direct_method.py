@@ -30,7 +30,8 @@ from .doubly_robust import dr_policy_value
 
 
 def dm_policy_value(q_all: np.ndarray, policy_probs: np.ndarray,
-                    policy_name: str = "unspecified") -> OPEResult:
+                    policy_name: str = "unspecified",
+                    graph_version: str | None = None) -> OPEResult:
     """Direct-Method value of a (possibly stochastic) policy.
 
     q_all, policy_probs: shape (n, n_actions). policy_probs rows sum to 1.
@@ -42,13 +43,14 @@ def dm_policy_value(q_all: np.ndarray, policy_probs: np.ndarray,
         n=len(per_play),
         estimator="DM",
         policy=policy_name,
-        graph_version=version_tag(),
+        graph_version=graph_version or version_tag(),
     )
 
 
 def behavior_recovery_check(
     ds: Dataset, q: QModel, beh: BehaviorModel,
     q_all: np.ndarray | None = None, weight_clip: float = 20.0,
+    graph_version: str | None = None,
 ) -> dict:
     """Smoke test: does OPE recover the behavior policy's mean reward?
 
@@ -70,9 +72,11 @@ def behavior_recovery_check(
         q_all = q.predict_all_actions(df)
     pi_b = beh.propensity(df)
 
-    dm_pi_b = dm_policy_value(q_all, pi_b, policy_name="behavior")
+    dm_pi_b = dm_policy_value(q_all, pi_b, policy_name="behavior",
+                              graph_version=graph_version)
     dr_pi_b = dr_policy_value(q_all, pi_b, pi_b, actions, rewards,
-                              weight_clip=weight_clip, policy_name="behavior")
+                              weight_clip=weight_clip, policy_name="behavior",
+                              graph_version=graph_version)
 
     tol = max(2 * empirical_se, 0.02)
     return {

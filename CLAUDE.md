@@ -18,7 +18,7 @@ Causal methods (deconfounded OPE, instrumental variables, structural counterfact
 ## Problem Definition
 
 - **State (S)**: pre-snap context - down, distance, field position, score differential, time remaining, timeouts, personnel, formation, motion, opponent rolling tendencies, QB/OC identity, weather.
-- **Action (A)**: defensive call - coverage shell x pressure x front x disguise. Discretized and (eventually) factored hierarchically.
+- **Action (A)**: defensive call - personnel package x front x coverage shell x pressure (x disguise, which needs pre-snap alignment data not available from free sources). Discretized and factored hierarchically — see V3.
 - **Reward (R)**: EPA-against pre play (primary); drive-level outcomes as secondary signal.
 - **Confounders**: coach's hidden read, matchup intuition, recent film study - proxied by tracking data once available.
 
@@ -80,13 +80,39 @@ Every version ships a narrated demo notebook (`notebooks/vN_pipeline_walkthrough
 - **Demo**: `notebooks/v2_pipeline_walkthrough.ipynb` — real-data narrative (action sparsity, DAG + DoWhy identification, positivity heatmap, calibration curve, DR recovery, sensitivity band) plus a synthetic ground-truth validation aside.
 
 ### V3 - Scale and Transfer
-- **Scope**: multi-team, factored 50+ action space.
-- **Models**: neural π_b and Q-model with embeddings (team, QB, OC), invariant policy learning across seasons/teams, hierarchical factored policy.
-- **Add**: explainability layer surfacing top causal features per recommendation; standalone IPW estimator to complete the DM -> IPW -> DR ladder (deferred from V2 — see Step 5); econml CATE estimators; **Dirichlet / vector scaling** for the shell imputer (deferred from V2 — see below).
-- **Latent-treatment imputation** (`src/models/imputation/`, built at V2, not yet wired into a pipeline): coverage shell imputed for run plays from a calibrated pre-snap posterior, sampled m times and pooled by Rubin's rules. Declared feature set in `imputation/features.py` (19 features), guarded by `assert_imputer_features` the way the SCM adjustment set is guarded by `assert_adjustment_consistency`.
-  - **Calibration is the open item.** Temperature scaling (cross-fitted over 5 folds) fixes top-class confidence — confidence ECE 0.0321 -> 0.0199 — but barely moves **classwise ECE** (0.0378 -> 0.0372), and classwise is what matters here because the posterior is *sampled from* rather than argmaxed. A single global scalar cannot reshape per-class probabilities; Dirichlet (K^2+K params) or vector scaling (2K) is the next rung.
-  - **Known costs, measured**: information removed from the 6-way prior is only ~19.6%; two independent draws agree on ~32% of plays; ~43% of pooled variance comes from not knowing the label. Excluding the outcome from the imputer attenuates recovered effects toward null (deliberate, conservative, and pinned by `test_imputation_attenuates_effects_toward_the_marginal`).
-- **Demo**: `notebooks/v3_pipeline_walkthrough.ipynb` — multi-team transfer story: cross-team/season OPE, invariance checks, hierarchical-policy drill-down, and the per-recommendation causal-feature explanations.
+- **Scope**: all 32 defenses pooled, **all snaps (runs included)**, seasons 2022–2024 for training with **2025 held out**. FTN charting (2022+) and nflfastR's `defense_personnel` (charted on ~100% of snaps) supply the fully-observed action axes.
+- **Action space — two-level hierarchical factorization (12 x 12 = 144)**:
+  - **Level 1 — personnel package (base <=4 DB / nickel 5 / dime+ 6+) x front (box <=5 / 6 / 7 / 8+) = 12.** Genuinely pre-snap and observed on ~100% of runs and passes. No dropback selection, so short-yardage and goal-line states are in the data and the run/pass *deterrence* term is estimable (run rate by package: base 64% / nickel 40% / dime+ 14%). This is the headline.
+  - **Level 2 — coverage shell (6) x pressure (2) = 12.** The shell is *called* pre-snap on every play, so the policy recommends one on every snap — but its value is *estimated* on dropbacks only, where it is observed, and both components are measured post-snap (played coverage, actual rushers). A dropback-conditional refinement to level 1, labeled as such.
+  - **Disguise dropped.** Disguise is the gap between the shown pre-snap shell and the played coverage; free data carries only the played half. Needs PFF-grade pre-snap alignment — V4+ at the earliest.
+- **Models**: GBM π_b and Q (the V2 estimators plus team features) are the baseline. Neural π_b and Q with embeddings for **defense team, offense team, and opposing QB**, temperature-calibrated and **gated against the GBM baseline on held-out-season OPE** — they ship only if they beat it. No OC/DC embedding: free data carries only head coaches, one per defense per season, i.e. equivalent to team-season.
+- **Invariance**: environments are **team-seasons** (96 in training). Test first — do action-component effects differ significantly across environments? — then an invariance-penalized Q (IRM / REx-style) only if the test says it is needed. Transfer is judged by leave-one-team-out and leave-one-season-out OPE.
+- **Add**: standalone IPW estimator completing the DM -> IPW -> DR ladder (deferred from V2 — see Step 5); econml CATE estimators; explainability layer surfacing top causal features per recommendation (Step 8 format); interpretable-Γ sensitivity (benchmark the bound against observed confounders, Cinelli–Hazlett style); **Dirichlet / vector scaling** for the shell imputer.
+- **Shell imputation is a sensitivity analysis, not core** (`src/models/imputation/`, built at V2). It answers one question: *does imputing shell on run plays change any level-1 conclusion?* It stays out of the core path because:
+  - it would contaminate level 1, the one result that is assumption-light (observed treatment, every snap, no transportability assumption);
+  - it adds little: ~19.6% of shell uncertainty removed, two draws agree on ~32% of plays, ~43% of pooled variance comes from the unknown label;
+  - excluding the outcome from the imputer attenuates run-play shell effects toward zero *by construction* — Rubin's rules fix the variance, not that bias — so in the core path the policy would learn "shell doesn't matter on runs" because the data was built to say so;
+  - its transportability assumption cannot be validated: the only NGS-charted runs are runs defended as passes (mean reward −0.39 vs +0.07 on ordinary runs).
+  - Revisit if PFF-grade shell labels on runs become available, if the sensitivity analysis flips a level-1 conclusion, or if the imputer's information rises materially.
+  - **Imputer calibration (still open)**: cross-fitted temperature scaling fixes confidence ECE (0.0321 -> 0.0199) but barely moves classwise ECE (0.0378 -> 0.0372), which is what matters for a posterior that is sampled from. Dirichlet (K^2+K params) or vector scaling (2K) is the next rung.
+- **Known limitation**: the level-2 estimand assumes the shell's effect on run plays is negligible or absorbed by level 1. The model cannot recommend a shell *for its run-fit value* ("Cover-3 because its safeties help against the run") — a real gap, since the shell is chosen before the defense knows which branch it is on. State it in the V3 docs, don't leave it implicit.
+- **Regression gate V2 -> V3 (Phase 2)**: V3 changes scope, action space and estimand, so the two policies don't answer the same question. Gate by **projection into the joint space**: on SF charted dropbacks in the 2025 holdout, express both policies over (alignment x coverage) — V2's as its shell x pressure policy with the alignment following behavior, V3's as its alignment policy with the coverage following the level-2 policy — and compare them by paired DR with a joint Q. V3 must not regress on V2's own question; later versions gate against V3.
+  - *Why not in Phase 1*: V2's Q is a function of shell x pressure only, blind to personnel and box count — exactly what level 1 changes — so projecting a level-1-only policy onto V2's action space would pass trivially while measuring nothing. The comparison needs the level-2 models Phase 2 builds. Phase 1 gates the level-1 policy against its own greedy baseline.
+- **Build phases** (walking-skeleton first):
+  0. Housekeeping — `v2` tag, `configs/v3.yaml`, `defense_personnel` in the data layer with a cache bump, guards for post-snap participation columns.
+  1. **Level 1 end to end (done)** — multi-team data, package x front on all snaps, GBM π_b and a pooled GBM Q with team features, the alignment graph (`scm.graph.ALIGNMENT_GRAPH`, v3.0), DM -> IPW -> DR ladder, conservative level-1 policy, 2025-holdout OPE, level-1 regression gate, notebook.
+  2. Level 2 — shell x pressure policy given the level-1 call; combined DR over the factored policy; the V2 -> V3 projection gate.
+  3. Transfer & invariance — leave-one-team/season-out OPE; invariance test, then an invariance-penalized Q if needed.
+  4. Neural π_b/Q with embeddings, gated against GBM.
+  5. Explainability — econml CATE, per-recommendation causal explanations, interpretable Γ.
+  6. Refinements — Dirichlet/vector scaling; the imputation sensitivity analysis.
+- **Phase 1 findings** (each changed the build):
+  - **Q structure.** One regressor per alignment estimates each cell with independent noise, inflating the spread across actions (2.1x the truth on a known SCM at real scale), so the policy's argmax chases the most overestimated cell. A **pooled** Q over (state, package, front) keeps the spread honest (0.8x) and let the conservative policy capture ~77% of the available true gain vs ~45% per-action. `outcome_model.structure: pooled`; the dropback pipeline keeps per-action.
+  - **The positivity floor does real work.** Raw argmax-Q *loses* to the coordinator in truth; the same argmax restricted to π_b >= 0.05 beats it.
+  - **QB leak.** `passer_player_id` exists on 100% of passes and 0% of runs, so a QB feature grouped on it is defaulted on every run and encodes play type — a post-snap fact in the state. The QB on the field is carried within each offense's game (`features._qb_on_field`).
+  - **Offensive tendency** is now per offense and distance bucket; pooled over offenses it is close to a league constant, and on a pass-only sample it is identically 1.
+  - **DR noise on small samples.** On the ~2k-play synthetic holdout DR's error on the policy value (±0.03) is as large as the true gain (+0.017), flipping sign between runs — noise, not bias. The real holdout is ~16x larger.
+- **Demo**: `notebooks/v3_pipeline_walkthrough.ipynb` — level-1 recommendations on every snap (short yardage included), the DM -> IPW -> DR ladder, cross-team/season OPE and invariance checks, hierarchical-policy drill-down, per-recommendation causal explanations, and the imputation sensitivity result.
 
 ### V4 - Power-Ups
 - **Scope**: tracking-data features, structural simulator, full deployment loop. 
@@ -148,12 +174,13 @@ tests/              # unit + integration; synthetic SCM regression tests
 - The notebook must execute clean top-to-bottom before merge (`python -m nbconvert --to notebook --execute --inplace notebooks/vN_pipeline_walkthrough.ipynb`); a failing or stale notebook blocks merge like a failing test.
 - Real-data narrative with a synthetic ground-truth validation aside (V2+), so every headline OPE claim is checkable against a known SCM.
 - When a version is superseded, freeze its notebook at that version's git tag rather than letting it rot against `HEAD`.
+- Notebooks and the README are **standalone**: no references to earlier versions, upgrades, or what changed. Version history is internal — it lives here in CLAUDE.md and in git tags.
 
 ---
 
 ## Data Sources
 
-- **nflfastR** (NFL play-by-play, free)
+- **nflfastR** (NFL play-by-play, free). Its participation merge carries `defense_personnel` on ~100% of snaps, runs included — pre-snap, and the source of the V3 personnel-package axis. Only head coaches are recorded (no DC/OC identity).
 - **FTN charting** (free, 2022+, via `nfl_data_py.import_ftn_data`) - play-level charting on ~99% of scrimmage plays **including runs**: `n_defense_box`, `is_motion`, `n_offense_backfield`, `qb_location`, plus post-snap `is_play_action` / `is_rpo` / `is_screen_pass`. This is the only free source of a defensive attribute observed on every snap, since NGS coverage labels are ~94% on dropbacks and ~3% on runs.
 - **CFBfastR** (college play-by-play, free)
 - **NFL Next Gen Stats** (tracking, public release - limited)

@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.scm import graph as scm
 from src.scm import identify
-from src.data.load import FTN_POSTSNAP, FTN_PRESNAP_DEFENSE
+from src.data.load import FTN_POSTSNAP, FTN_PRESNAP_DEFENSE, POSTSNAP_COLUMNS
+from src.models.imputation.features import FORBIDDEN_FEATURES
 from src.schemas.dataset import Dataset
 
 
@@ -147,3 +148,30 @@ def test_postsnap_ftn_flags_are_rejected_as_state(fitted):
     )
     with pytest.raises(ValueError):
         identify.assert_adjustment_consistency(polluted)
+
+
+# ── Post-snap columns ────────────────────────────────────────────────────────
+@pytest.mark.parametrize("col", ["time_to_throw", "was_pressure", "route"])
+def test_postsnap_participation_columns_are_rejected_as_state(fitted, col):
+    """nflverse participation data sits one line from `defense_personnel` and
+    looks like pre-snap context. These three are measured as the play unfolds;
+    conditioning on any of them leaks the outcome into the state."""
+    ds = fitted["ds"]
+    polluted = Dataset(
+        df=ds.df.assign(**{col: 0.0}), numeric_state=ds.numeric_state + [col],
+        categorical_state=ds.categorical_state, action_col=ds.action_col,
+        reward_col=ds.reward_col, n_actions=ds.n_actions,
+        action_labels=ds.action_labels,
+    )
+    with pytest.raises(ValueError, match="Post-snap"):
+        identify.assert_adjustment_consistency(polluted)
+
+
+def test_no_declared_confounder_is_postsnap():
+    """The adjustment set itself must be clean, not just the fitted state."""
+    assert not (POSTSNAP_COLUMNS & set(scm.adjustment_columns()))
+
+
+def test_imputer_forbids_every_postsnap_column():
+    """One declaration, enforced in both places that consume features."""
+    assert POSTSNAP_COLUMNS <= FORBIDDEN_FEATURES

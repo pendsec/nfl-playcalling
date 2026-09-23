@@ -27,6 +27,7 @@ downstream model needs, so feature lists are defined once, here.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from .load import (COVERAGE_SHELLS, FTN_POSTSNAP, FTN_PRESNAP_DEFENSE,
@@ -69,14 +70,111 @@ CATEGORICAL_STATE = ["formation", "qb_location"]
 #     `scm.identify.assert_adjustment_consistency` has real columns to reject.
 #
 # `test_carried_columns_never_enter_the_state` is what keeps this honest.
-CARRIED_COLUMNS = list(FTN_PRESNAP_DEFENSE) + list(FTN_POSTSNAP)
+CARRIED_COLUMNS = list(FTN_PRESNAP_DEFENSE) + list(FTN_POSTSNAP) + ["play_type"]
+
+
+# ── Level-1 action: personnel package x front, on every snap ────────────────
+# The alignment the defense shows before the snap. Both halves are charted on
+# ~100% of snaps (personnel in nflfastR's participation data, box count in
+# FTN), runs included, and both are chosen pre-snap — so unlike coverage and
+# pressure, which are measured as the play unfolds and only on dropbacks, this
+# is an action a coordinator can actually call and we can actually observe.
+PACKAGES = ["base", "nickel", "dime_plus"]
+FRONTS = ["box_le5", "box6", "box7", "box_ge8"]
+N_FRONTS = len(FRONTS)
+LEVEL1_LABELS = {p * N_FRONTS + f: f"{PACKAGES[p]}_{FRONTS[f]}"
+                 for p in range(len(PACKAGES)) for f in range(N_FRONTS)}
+
+# Team identity is a confounder in the every-snap graph: a defense's personnel
+# and scheme drive both its calls and its outcomes, and so does the opponent.
+TEAM_STATE = ["defteam", "posteam"]
+
+
+def action_scheme(cfg: dict) -> str:
+    """`shell_pressure` (charted dropbacks) or `level1` (every snap)."""
+    return cfg.get("action", {}).get("scheme", "shell_pressure")
+
+
+def state_columns(cfg: dict) -> tuple[list[str], list[str]]:
+    """(numeric, categorical) state features for the configured action scheme.
+
+    Must equal the adjustment set of `scm.graph_for(cfg)` — asserted by
+    `scm.identify.assert_adjustment_consistency`.
+    """
+    if action_scheme(cfg) == "level1":
+        return list(NUMERIC_STATE), list(CATEGORICAL_STATE) + TEAM_STATE
+    return list(NUMERIC_STATE), list(CATEGORICAL_STATE)
+
+
+def action_feature_matrix(cfg: dict) -> np.ndarray:
+    """The feature vector each action id stands for, shape (n_actions, k).
+
+    Both schemes factor into two ordered components, and exposing them — rather
+    than 12 unrelated ids — is what lets a pooled outcome model share strength
+    across cells: (package, front) for the every-snap scheme, where more
+    defensive backs is lighter and more box defenders heavier; (shell, blitz)
+    for the dropback scheme, with shells ordered man/press -> deep zone.
+    """
+    if action_scheme(cfg) == "level1":
+        ids = np.arange(len(LEVEL1_LABELS))
+        return np.column_stack([ids // N_FRONTS, ids % N_FRONTS]).astype(float)
+    ids = np.arange(N_ACTIONS)
+    return np.column_stack([ids // 2, ids % 2]).astype(float)
+
+
+def personnel_db_count(personnel: pd.Series) -> pd.Series:
+    """Defensive backs on the field, parsed from "3 CB, 2 DE, 2 DT, 1 FS, ...".
+
+    Returns 0 where nothing parses, which callers treat as unlabeled — a real
+    alignment always has at least one defensive back.
+    """
+    text = personnel.fillna("").astype(str)
+    total = pd.Series(0.0, index=personnel.index)
+    for pos in ("CB", "FS", "SS", "DB"):
+        total += text.str.extract(rf"(\d+)\s*{pos}\b")[0].astype(float).fillna(0)
+    return total
+
+
+def _label_level1(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """Construct the 12-action personnel-package x front treatment.
+
+    Rows whose personnel does not parse, or that FTN never charted a box count
+    for, carry no observed alignment and are dropped rather than guessed.
+    """
+    spec = cfg["action"]["level1"]
+    packages = spec["personnel_packages"]
+    if list(packages) != PACKAGES:
+        raise ValueError(f"personnel_packages must be declared in order {PACKAGES}, "
+                         f"got {list(packages)}")
+
+    n_db = personnel_db_count(df["defense_personnel"])
+    package = pd.Series(np.nan, index=df.index)
+    for i, name in enumerate(PACKAGES):
+        lo, hi = packages[name]
+        package[(n_db >= lo) & (n_db <= hi) & (n_db > 0)] = i
+
+    box = pd.to_numeric(df[FTN_PRESNAP_DEFENSE[0]], errors="coerce")
+    # front_bins [5, 6, 7] -> <=5 | 6 | 7 | >=8
+    front = pd.Series(np.searchsorted(spec["front_bins"], box.fillna(-1), side="left"),
+                      index=df.index).astype(float)
+    front[box.isna()] = np.nan
+
+    keep = package.notna() & front.notna()
+    df = df[keep].copy()
+    df["action"] = (package[keep] * N_FRONTS + front[keep]).astype(int)
+    df["action_label"] = df["action"].map(LEVEL1_LABELS)
+    return df
 
 
 def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
-    """Turn raw play-by-play into the (S, A, R) table for one team.
+    """Turn raw play-by-play into the (S, A, R) table.
 
-    Set `cfg['data']['down']` to an int to restrict to one down, or to "all"
-    / None for every down (the default).
+    `cfg['data']['team']` names one defense, or "all" to pool every defense
+    (team identity then enters the state as a confounder). The action scheme
+    — `cfg['action']['scheme']` — decides what the treatment is: coverage shell
+    x pressure on charted dropbacks, or personnel package x front on every snap.
+    Set `cfg['data']['down']` to an int to restrict to one down, or to "all" /
+    None for every down (the default).
     """
     team = cfg["data"]["team"]
     down = cfg["data"].get("down")
@@ -87,12 +185,13 @@ def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
 
     # ── 1. Filter to the slice ───────────────────────────────────────────────
     mask = (
-        (df["defteam"] == team)
-        & (df["play_type"].isin(play_types))
+        (df["play_type"].isin(play_types))
         & (df["epa"].notna())
         & (df["ydstogo"].notna())
         & (df["down"].notna())
     )
+    if team not in (None, "all"):
+        mask &= df["defteam"] == team
     if down not in (None, "all"):
         mask &= df["down"] == down
     if cfg["data"].get("use_ftn", False):
@@ -108,10 +207,17 @@ def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
     df = df[mask].copy()
 
     # ── 2. Action labeling (treatment) ───────────────────────────────────────
-    df = _label_actions(df, cfg)
+    scheme = action_scheme(cfg)
+    if scheme == "level1":
+        df = _label_level1(df, cfg)
+        labels = LEVEL1_LABELS
+    else:
+        df = _label_actions(df, cfg)
+        labels = ACTION_LABELS
+    numeric_state, categorical_state = state_columns(cfg)
 
     # ── 3. Pre-snap state features ───────────────────────────────────────────
-    df = _build_state(df)
+    df = _build_state(df, per_offense=(scheme == "level1"))
 
     # ── 4. Reward ────────────────────────────────────────────────────────────
     df["reward"] = -df["epa"] if cfg["reward"]["negate_epa"] else df["epa"]
@@ -121,19 +227,19 @@ def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
     cols = (
         ["game_id", "play_id", "season", "week", "epa", "reward",
          "action", "action_label"]
-        + NUMERIC_STATE + CATEGORICAL_STATE + CARRIED_COLUMNS + ground_truth
+        + numeric_state + categorical_state + CARRIED_COLUMNS + ground_truth
     )
-    cols = [c for c in cols if c in df.columns]
-    df = df[cols].dropna(subset=NUMERIC_STATE + ["action"]).reset_index(drop=True)
+    cols = list(dict.fromkeys(c for c in cols if c in df.columns))
+    df = df[cols].dropna(subset=numeric_state + ["action"]).reset_index(drop=True)
 
     return Dataset(
         df=df,
-        numeric_state=list(NUMERIC_STATE),
-        categorical_state=list(CATEGORICAL_STATE),
+        numeric_state=numeric_state,
+        categorical_state=categorical_state,
         action_col="action",
         reward_col="reward",
-        n_actions=N_ACTIONS,
-        action_labels=dict(ACTION_LABELS),
+        n_actions=len(labels),
+        action_labels=dict(labels),
     )
 
 
@@ -154,14 +260,20 @@ def slice_report(pbp: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     team = cfg["data"]["team"]
     kept = cfg["data"].get("play_types", ["pass", "run"])
     df = pbp[
-        (pbp["defteam"] == team)
-        & pbp["epa"].notna() & pbp["ydstogo"].notna() & pbp["down"].notna()
+        pbp["epa"].notna() & pbp["ydstogo"].notna() & pbp["down"].notna()
         & pbp["play_type"].isin(["pass", "run"])
     ]
+    if team not in (None, "all"):
+        df = df[df["defteam"] == team]
     if "play_type_nfl" in df.columns:
         df = df[~df["play_type_nfl"].isin(["SPIKE", "KNEEL"])]
 
-    usable = df["defense_coverage_type"].astype("string").str.upper().isin(COVERAGE_SHELLS)
+    if action_scheme(cfg) == "level1":
+        # The alignment is labeled wherever personnel parses — coverage charting
+        # is irrelevant to this treatment, which is the point of it.
+        usable = personnel_db_count(df["defense_personnel"]) > 0
+    else:
+        usable = df["defense_coverage_type"].astype("string").str.upper().isin(COVERAGE_SHELLS)
     # Mirror every filter `build_dataset` applies, so the reported count is the
     # count that actually reaches the models. A report that says "1,907 charted"
     # beside a 1,902-play slice sends the reader hunting for the difference.
@@ -209,7 +321,7 @@ def _label_actions(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     return df
 
 
-def _build_state(df: pd.DataFrame) -> pd.DataFrame:
+def _build_state(df: pd.DataFrame, per_offense: bool = False) -> pd.DataFrame:
     """Engineer the pre-snap state vector. No post-snap information allowed."""
 
     # Extract game state data and clean
@@ -238,7 +350,7 @@ def _build_state(df: pd.DataFrame) -> pd.DataFrame:
         .fillna("UNKNOWN").astype(str).str.upper()
 
     df = _build_ftn_state(df)
-    df = _add_history_features(df)
+    df = _add_history_features(df, per_offense=per_offense)
     return df
 
 
@@ -298,7 +410,7 @@ def assert_ftn_coverage(df: pd.DataFrame, cfg: dict) -> None:
         )
 
 
-def _add_history_features(df: pd.DataFrame) -> pd.DataFrame:
+def _add_history_features(df: pd.DataFrame, per_offense: bool = False) -> pd.DataFrame:
     """Strictly-historical rolling features — offense tendency + EPA proxies.
 
     All use an expanding mean shifted one play within time order, so a play's
@@ -313,17 +425,40 @@ def _add_history_features(df: pd.DataFrame) -> pd.DataFrame:
         df["ydstogo"], bins=[0, 3, 7, 15, 100],
         labels=["short", "medium", "long", "very_long"],
     ).astype(str)
+    # Pooled across offenses, a pass rate by distance is close to a league
+    # constant; per offense it is an actual tendency. Grouped per offense when
+    # runs are in the sample (on a pass-only sample every value would be 1).
+    keys = ["posteam", "dist_bucket"] if per_offense and "posteam" in df.columns \
+        else ["dist_bucket"]
     df["off_pass_tendency"] = (
-        df.groupby("dist_bucket")["is_pass"]
+        df.groupby(keys)["is_pass"]
         .transform(lambda x: x.expanding().mean().shift(1))
         .fillna(0.55)
     )
 
     # Player / unit EPA proxies — historical mean EPA by defense and by QB.
     df["def_team_avg_epa"] = _expanding_mean(df, "defteam", "epa")
-    qb_key = "passer_player_id" if "passer_player_id" in df.columns else "posteam"
-    df["qb_avg_epa"] = _expanding_mean(df, qb_key, "epa")
+    df["qb_on_field"] = _qb_on_field(df)
+    df["qb_avg_epa"] = _expanding_mean(df, "qb_on_field", "epa")
     return df
+
+
+def _qb_on_field(df: pd.DataFrame) -> pd.Series:
+    """The offense's quarterback on every snap, not just on passes.
+
+    nflfastR records `passer_player_id` only on pass plays — 100% of passes and
+    0% of runs. Grouping a QB feature by it directly makes the feature missing
+    (and then defaulted) on every run, so its value alone reveals whether the
+    play was a run: a post-snap fact smuggled into the pre-snap state. The QB
+    on the field is identity, visible before the snap, so it is carried within
+    each offense's game to the snaps where he did not throw.
+    """
+    if "passer_player_id" not in df.columns:
+        return df.get("posteam", pd.Series("UNK", index=df.index))
+    if not {"game_id", "posteam"} <= set(df.columns):
+        return df["passer_player_id"]
+    return (df.groupby(["game_id", "posteam"])["passer_player_id"]
+            .transform(lambda x: x.ffill().bfill()))
 
 
 def _expanding_mean(df: pd.DataFrame, group_col: str, value_col: str) -> pd.Series:

@@ -37,6 +37,8 @@ No networkx dependency here — the graph is a plain edge list plus helpers.
 
 from __future__ import annotations
 
+from .dag import CausalGraph
+
 # ── Abstract nodes ───────────────────────────────────────────────────────────
 GAME_STATE = "game_state"        # down, distance, field, score, time, timeouts
 OFF_PERSONNEL = "off_personnel"  # RB/TE/WR counts
@@ -166,74 +168,128 @@ CONFOUNDER_COLUMNS = {
 GRAPH_VERSION = "v2.2"
 
 
-def fingerprint() -> str:
-    """Short content hash of the DAG's structural claims.
+# ── The graphs themselves ────────────────────────────────────────────────────
+# Built from the module-level containers above BY REFERENCE (see dag.py), so the
+# fingerprint tracks any edit to them.
+SHELL_PRESSURE_GRAPH = CausalGraph(
+    name="coverage shell x pressure, charted dropbacks",
+    version=GRAPH_VERSION,
+    treatment=TREATMENT, outcome=OUTCOME, edges=EDGES,
+    observed_confounders=OBSERVED_CONFOUNDERS,
+    confounder_columns=CONFOUNDER_COLUMNS,
+    observed=OBSERVED, unobserved=UNOBSERVED, mediators=MEDIATORS,
+    selection=SELECTION, defensive_choice=DEFENSIVE_CHOICE,
+    def_choice_columns=DEF_CHOICE_COLUMNS,
+    treatment_columns=["defense_coverage_type", "number_of_pass_rushers"],
+    sample_note=("the estimand is conditional on a charted dropback, so "
+                 "run/pass deterrence is outside it"),
+)
 
-    Covers the edge list, the observed/unobserved split, the mediator and
-    selection sets, and the concrete adjustment columns — i.e. everything that changes what the
-    backdoor adjustment means. Two estimates with the same GRAPH_VERSION but
-    different fingerprints were computed under different graphs.
+
+# ── Every-snap graph: treatment = personnel package x front ─────────────────
+# The alignment the defense shows before the snap — which personnel package is
+# on the field, and how many defenders are in the box. Both are charted on ~100%
+# of snaps, runs included, and both are chosen before the snap, so this is the
+# first treatment in the project that is simultaneously callable and fully
+# observed. Three structural differences from the dropback graph:
+#
+#   * No dropback selection. Runs are in the sample, so the offense's run/pass
+#     choice is a MEDIATOR the effect flows through (deterrence: run rate falls
+#     from 64% against base personnel to 14% against dime), not a variable the
+#     sample is conditioned on.
+#   * The coverage call is a MEDIATOR too. The DC pairs a shell and a pressure
+#     with the alignment, and that pairing is part of what calling an alignment
+#     does — so the level-1 estimand is the alignment's TOTAL effect, including
+#     the coverage that typically comes with it. Coverage is also measured
+#     post-snap and missing on runs, so it could not be adjusted for anyway.
+#   * Team identity is a confounder. A defense's personnel and scheme drive its
+#     calls AND its outcomes, and the opposing offense shapes both as well.
+TEAMS = "team_identity"          # defense + offense identity (confounder)
+DEF_ALIGNMENT = "def_alignment"  # treatment: personnel package x front
+DEF_COVERAGE = "def_coverage"    # the paired shell x pressure — a MEDIATOR here
+
+ALIGNMENT_OBSERVED_CONFOUNDERS = OBSERVED_CONFOUNDERS + [TEAMS]
+ALIGNMENT_CONFOUNDER_COLUMNS = {**CONFOUNDER_COLUMNS, TEAMS: ["defteam", "posteam"]}
+ALIGNMENT_EDGES = [
+    # structure among the pre-snap state
+    (GAME_STATE, OFF_PERSONNEL), (GAME_STATE, OFF_FORMATION),
+    (GAME_STATE, OFF_TENDENCIES), (OFF_PERSONNEL, OFF_FORMATION),
+    (TEAMS, PLAYER_PROXIES),
+    # confounders -> the call, the outcome, and the offense's run/pass choice
+    (GAME_STATE, DEF_ALIGNMENT), (GAME_STATE, EPA), (GAME_STATE, DEF_COVERAGE),
+    (OFF_PERSONNEL, DEF_ALIGNMENT), (OFF_PERSONNEL, EPA), (OFF_PERSONNEL, OFF_PLAYCALL),
+    (OFF_FORMATION, DEF_ALIGNMENT), (OFF_FORMATION, EPA), (OFF_FORMATION, OFF_PLAYCALL),
+    (OFF_TENDENCIES, DEF_ALIGNMENT), (OFF_TENDENCIES, OFF_PLAYCALL),
+    (PLAYER_PROXIES, DEF_ALIGNMENT), (PLAYER_PROXIES, EPA),
+    (TEAMS, DEF_ALIGNMENT), (TEAMS, EPA), (TEAMS, OFF_PLAYCALL),
+    # the hidden read
+    (COACH_READ, DEF_ALIGNMENT), (COACH_READ, DEF_COVERAGE), (COACH_READ, EPA),
+    # the effect, and the paths it travels
+    (DEF_ALIGNMENT, EPA),
+    (DEF_ALIGNMENT, OFF_PLAYCALL),       # deterrence
+    (DEF_ALIGNMENT, DEF_COVERAGE),       # the coverage paired with the alignment
+    (OFF_PLAYCALL, EPA), (DEF_COVERAGE, EPA),
+]
+ALIGNMENT_OBSERVED = (set(ALIGNMENT_OBSERVED_CONFOUNDERS)
+                      | {OFF_PLAYCALL, DEF_ALIGNMENT, DEF_COVERAGE, EPA})
+ALIGNMENT_MEDIATORS = {OFF_PLAYCALL, DEF_COVERAGE}
+
+# v3.0 — the every-snap alignment graph (new treatment, team confounders, the
+# coverage call and the offense's run/pass choice both mediators, no selection).
+ALIGNMENT_GRAPH_VERSION = "v3.0"
+
+ALIGNMENT_GRAPH = CausalGraph(
+    name="personnel package x front, every snap",
+    version=ALIGNMENT_GRAPH_VERSION,
+    treatment=DEF_ALIGNMENT, outcome=EPA, edges=ALIGNMENT_EDGES,
+    observed_confounders=ALIGNMENT_OBSERVED_CONFOUNDERS,
+    confounder_columns=ALIGNMENT_CONFOUNDER_COLUMNS,
+    observed=ALIGNMENT_OBSERVED, unobserved=UNOBSERVED,
+    mediators=ALIGNMENT_MEDIATORS,
+    treatment_columns=["defense_personnel", "n_defense_box",
+                       "personnel_package", "front"],
+    sample_note=("no dropback selection: every FTN- and personnel-charted "
+                 "scrimmage snap, runs included"),
+)
+
+
+def graph_for(cfg: dict) -> CausalGraph:
+    """The graph a configuration's estimates are made under.
+
+    Keyed on the ACTION SCHEME rather than a version string, because the graph
+    is a claim about the treatment: change what the action is, and the backdoor
+    set, the mediators and the selection all change with it.
     """
-    import hashlib
+    scheme = cfg.get("action", {}).get("scheme", "shell_pressure")
+    if scheme == "level1":
+        return ALIGNMENT_GRAPH
+    if scheme == "shell_pressure":
+        return SHELL_PRESSURE_GRAPH
+    raise ValueError(f"unknown action scheme {scheme!r}")
 
-    payload = "|".join([
-        ";".join(f"{s}->{t}" for s, t in sorted(EDGES)),
-        ";".join(sorted(OBSERVED)),
-        ";".join(sorted(UNOBSERVED)),
-        ";".join(sorted(MEDIATORS)),
-        ";".join(sorted(SELECTION)),
-        ";".join(sorted(DEFENSIVE_CHOICE)),
-        f"{TREATMENT}->{OUTCOME}",
-        ";".join(adjustment_columns()),
-    ])
-    return hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+# ── Module-level API: the shell x pressure graph ─────────────────────────────
+# Kept so existing callers read naturally; each delegates to the graph object,
+# so there is one implementation of every structural computation.
+def fingerprint() -> str:
+    return SHELL_PRESSURE_GRAPH.fingerprint()
 
 
 def version_tag() -> str:
-    """`GRAPH_VERSION+fingerprint` — the string stamped onto every OPE record."""
-    return f"{GRAPH_VERSION}+{fingerprint()}"
+    return SHELL_PRESSURE_GRAPH.version_tag()
 
 
 def adjustment_set() -> set[str]:
-    """Abstract confounder nodes to condition on (backdoor set given observed)."""
-    return set(OBSERVED_CONFOUNDERS)
+    return SHELL_PRESSURE_GRAPH.adjustment_set()
 
 
 def adjustment_columns() -> list[str]:
-    """Concrete feature columns forming the adjustment set (mediators excluded).
-
-    This is what the Q-model conditions on and what DoWhy receives as common
-    causes. Deliberately excludes off_playcall and anything result-derived.
-    """
-    cols: list[str] = []
-    for node in OBSERVED_CONFOUNDERS:
-        cols.extend(CONFOUNDER_COLUMNS[node])
-    return cols
+    return SHELL_PRESSURE_GRAPH.adjustment_columns()
 
 
 def to_gml() -> str:
-    """GML serialization of the abstract DAG (for inspection / DoWhy)."""
-    nodes = sorted(OBSERVED | UNOBSERVED)
-    lines = ["graph [", "  directed 1"]
-    for n in nodes:
-        lines.append(f'  node [ id "{n}" label "{n}" ]')
-    for s, t in EDGES:
-        lines.append(f'  edge [ source "{s}" target "{t}" ]')
-    lines.append("]")
-    return "\n".join(lines)
+    return SHELL_PRESSURE_GRAPH.to_gml()
 
 
 def describe() -> str:
-    """Human-readable summary for the run log."""
-    return (
-        f"V2 SCM [{version_tag()}]: treatment={TREATMENT}, outcome={OUTCOME}\n"
-        f"  adjustment set (condition on): {sorted(adjustment_set())}\n"
-        f"    -> {len(adjustment_columns())} feature columns\n"
-        f"  mediators (do NOT condition on): {sorted(MEDIATORS)}\n"
-        f"  unobserved confounders: {sorted(UNOBSERVED)} "
-        f"(bounded by the sensitivity analysis)\n"
-        f"  SELECTED ON: {sorted(SELECTION)} = 1 — the estimand is conditional on\n"
-        f"    a charted dropback, so run/pass deterrence is outside it\n"
-        f"  defensive choices carried but NOT adjusted for: {sorted(DEFENSIVE_CHOICE)}\n"
-        f"    (siblings of the treatment; the factored action space)"
-    )
+    return SHELL_PRESSURE_GRAPH.describe()

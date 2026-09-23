@@ -40,3 +40,33 @@ def fitted():
     policy = learn_conservative_policy(train, q, beh, CFG)
     return dict(ds=ds, train=train, test=test, beh=beh, q=q, diag=diag,
                 mu_train=mu_train, policy=policy)
+
+
+def _fit_level1(conf_strength: float) -> dict:
+    from _config import CFG_L1, L1_SEED, N_L1_PLAYS
+    from src.data.load import generate_synthetic_alignment
+
+    pbp = generate_synthetic_alignment(N_L1_PLAYS, seed=L1_SEED,
+                                       seasons=CFG_L1["data"]["seasons"],
+                                       conf_strength=conf_strength)
+    ds = build_dataset(pbp, CFG_L1)
+    train, test = time_aware_split(ds, CFG_L1["data"]["holdout_season"])
+    beh, diag = fit_behavior_model(train, CFG_L1)
+    q = fit_q_model(train, CFG_L1)
+    policy = learn_conservative_policy(train, q, beh, CFG_L1)
+    return dict(ds=ds, train=train, test=test, beh=beh, q=q, diag=diag, policy=policy)
+
+
+@pytest.fixture(scope="session")
+def fitted_l1():
+    """The every-snap pipeline fit once on a known alignment SCM, WITH the
+    hidden read confounding the outcome (the realistic case)."""
+    return _fit_level1(conf_strength=0.20)
+
+
+@pytest.fixture(scope="session")
+def fitted_l1_unconfounded():
+    """Same SCM with the hidden read's effect on the outcome switched off — the
+    one setting where OPE should recover the TRUE policy value, not just the
+    behavior policy's empirical mean."""
+    return _fit_level1(conf_strength=0.0)

@@ -1,0 +1,110 @@
+# ── V3 — Scale and Transfer ─────────────────────────────────────────────────
+# Scope (per CLAUDE.md): all 32 defenses pooled, all snaps (runs included),
+# 2022-2024 train / 2025 held out. Two-level hierarchical action:
+#   level 1 — personnel package x front (12), observed on every snap
+#   level 2 — coverage shell x pressure (12), value estimated on dropbacks
+# This file is the single source of truth for the V3 run.
+#
+# Level 2 (shell x pressure given the alignment) is not wired in yet; this file
+# currently drives the level-1 pipeline end to end.
+
+version: v3
+
+data:
+  source: nflfastR            # nflfastR | synthetic
+  team: all                   # every defense pooled; `defteam` becomes a feature
+  seasons: [2022, 2023, 2024, 2025]
+  holdout_season: 2025        # time-aware split: train 2022-2024, test 2025
+  down: all
+  # Level 1 is observed on every snap, so runs stay in. Level 2 applies its own
+  # dropback restriction (see action.level2) rather than filtering the dataset.
+  play_types: [pass, run]
+  use_ftn: true               # FTN supplies n_defense_box; 2022+ only
+  ftn_min_coverage: 0.80
+  cache_dir: data/raw
+  processed_dir: data/processed
+
+action:
+  scheme: level1              # the treatment: personnel package x front
+  level1:                     # pre-snap, every snap
+    # Package by the number of defensive backs (CB + FS + SS + DB) on the field.
+    # 2024 shares: base 24% (64% run), nickel 66% (40% run), dime+ 10% (14% run).
+    personnel_packages:
+      base: [0, 4]
+      nickel: [5, 5]
+      dime_plus: [6, 11]
+    # FTN n_defense_box bucket edges: <=5 | 6 | 7 | >=8.
+    front_bins: [5, 6, 7]
+  level2:                     # post-snap-measured; value estimated on charted dropbacks
+    blitz_rusher_threshold: 5
+    drop_uncharted_coverage: true
+
+reward:
+  negate_epa: true
+
+# The V2 estimators, with team features added in Phase 1. Hyperparameters start
+# from V2's and are revisited once the pooled data is ~70x larger.
+behavior_model:
+  type: lightgbm
+  n_estimators: 300
+  learning_rate: 0.05
+  max_depth: 5
+  min_child_samples: 30
+  subsample: 0.8
+  colsample_bytree: 0.8
+  calibration_folds: 3
+  cross_fit_folds: 3
+
+outcome_model:
+  type: lightgbm
+  # One regressor over (state, package, front) rather than one per alignment:
+  # shares strength across the 12 cells. Against a known SCM at this scale it
+  # captured ~77% of the available policy gain vs ~45% for per-action models.
+  structure: pooled
+  n_estimators: 300
+  learning_rate: 0.05
+  max_depth: 5
+  min_child_samples: 20
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_cell: 20
+  cross_fit_folds: 5
+
+policy:
+  alpha: 1.0                  # in units of the Q model's within-state spread
+  support_threshold: 0.05
+
+ope:
+  clip_propensity: [0.01, 0.99]
+  weight_clip: 20.0
+  aipw_baseline: nickel_box6  # the modal alignment (~39% of snaps)
+
+sensitivity:
+  gamma_range: [1.0, 1.5, 2.0, 3.0]
+
+positivity:
+  min_count: 10
+
+invariance:                   # Phase 3
+  environment: team_season    # 96 environments across 2022-2024
+  transfer_splits: [leave_one_team_out, leave_one_season_out]
+
+evaluation:
+  baseline_name: greedy_baseline
+  candidate_name: conservative_candidate
+  regression_margin: 0.02
+  # V2 -> V3 gate by projection: marginalize V3's policy over level 1 into a
+  # distribution over shell x pressure on SF charted dropbacks in the holdout,
+  # then DR-evaluate it with V2's machinery refit on 2022-2024. V3 must not
+  # regress on V2's own question.
+  projection_gate:
+    baseline_config: configs/v2.yaml
+    team: SF
+
+output_dir: outputs/v3         # keeps the level-1 run from overwriting outputs/
+
+seed: 42
+
+synthetic:
+  n_plays: 9000
+  seed: 7
