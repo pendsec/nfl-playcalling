@@ -172,8 +172,15 @@ def compare_to_baseline(
     q: QModel,
     beh: BehaviorModel,
     cfg: dict,
+    ensemble=None,
+    candidate=None,
 ) -> VersionComparison:
-    """The concrete gate: behavior-constrained greedy vs conservative on holdout.
+    """The concrete gate: behavior-constrained greedy vs the configured
+    candidate (`policy.type`: conservative or safe) on holdout.
+
+    Pass `candidate` — the policy learned on the training seasons — whenever
+    the configured policy estimates anything from data (the safe policy's read
+    allowance does); built here, it would be estimated on the holdout.
 
     Both policies are built from the *same* fitted Q and pi_b, so the comparison
     isolates the decision rule — the thing that actually differs between them.
@@ -181,10 +188,11 @@ def compare_to_baseline(
     the policy change with the model change and tell us nothing about either.
     """
     from ..policy.greedy import learn_greedy_policy
-    from ..policy.conservative import learn_conservative_policy
+    from ..policy.safe import learn_policy
 
     baseline = learn_greedy_policy(test, q, beh, cfg)
-    candidate = learn_conservative_policy(test, q, beh, cfg)
+    if candidate is None:
+        candidate = learn_policy(test, q, beh, cfg, ensemble=ensemble)
 
     ecfg = cfg.get("evaluation", {})
     return compare_policies(

@@ -89,3 +89,35 @@ class PooledQModel:
     def predict_taken(self, df: pd.DataFrame, actions: np.ndarray) -> np.ndarray:
         q_all = self.predict_all_actions(df)
         return q_all[np.arange(len(df)), np.asarray(actions)]
+
+
+@dataclass
+class QEnsemble:
+    """Bootstrap replicates of a Q model — the sampling uncertainty of Q.
+
+    Each member is the same model refit on a resample of training GAMES (plays
+    within a game share an opponent, a script and a scoreboard, so resampling
+    plays would understate the uncertainty). The ensemble does not replace the
+    point Q; it says how far that Q's comparisons between calls can be trusted.
+
+    What a policy compares is not Q's level but a call's ADVANTAGE over what the
+    coordinator would do, so that is what the spread is measured on:
+
+        adv_b(s, a) = Q_b(s, a) - sum_a' pi_b(a'|s) Q_b(s, a')
+
+    Shifts that move every call together (season level, the state's own value)
+    cancel, and the coordinator's own mix has zero advantage by construction —
+    so a call is uncertain exactly when the data cannot say whether it beats
+    what the coordinator already does. Built by
+    `src.models.outcome.q_model.fit_q_ensemble`.
+    """
+    members: list
+    n_actions: int
+
+    def advantage_sd(self, df: pd.DataFrame, pi_b: np.ndarray) -> np.ndarray:
+        """Std of each call's advantage over the coordinator's mix, (n, n_actions)."""
+        adv = []
+        for m in self.members:
+            q = m.predict_all_actions(df)
+            adv.append(q - (pi_b * q).sum(axis=1, keepdims=True))
+        return np.stack(adv).std(axis=0, ddof=1)

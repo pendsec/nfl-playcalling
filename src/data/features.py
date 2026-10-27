@@ -85,6 +85,44 @@ N_FRONTS = len(FRONTS)
 LEVEL1_LABELS = {p * N_FRONTS + f: f"{PACKAGES[p]}_{FRONTS[f]}"
                  for p in range(len(PACKAGES)) for f in range(N_FRONTS)}
 
+# The axes level 1 can be built from, in id order (the first is the slowest-
+# varying digit). `action.level1.axes` picks which of them make up the call;
+# the default is both. The box count is the axis the coordinator's read of the
+# offense's intent confounds (heavy boxes face more runs than the state
+# predicts; packages do not), so it is kept separable: `axes: [package]` makes
+# the call the package alone, with nothing else to change.
+LEVEL1_AXES = {"package": PACKAGES, "front": FRONTS}
+
+
+def level1_axes(cfg: dict) -> list[str]:
+    """The configured level-1 axes, validated and in canonical order."""
+    axes = cfg.get("action", {}).get("level1", {}).get("axes", list(LEVEL1_AXES))
+    unknown = set(axes) - set(LEVEL1_AXES)
+    if unknown or not axes:
+        raise ValueError(f"action.level1.axes must be a non-empty subset of "
+                         f"{list(LEVEL1_AXES)}, got {axes}")
+    return [a for a in LEVEL1_AXES if a in axes]
+
+
+def level1_labels(cfg: dict) -> dict[int, str]:
+    """Action id -> label for the configured axes (e.g. `nickel_box6`, or
+    `nickel` when the call is the package alone)."""
+    labels = [""]
+    for axis in level1_axes(cfg):
+        labels = [f"{l}_{v}" if l else v for l in labels for v in LEVEL1_AXES[axis]]
+    return dict(enumerate(labels))
+
+
+def level1_components(actions, cfg: dict) -> dict[str, np.ndarray]:
+    """Split level-1 action ids into one integer array per configured axis."""
+    rest = np.asarray(actions)
+    out = {}
+    for axis in reversed(level1_axes(cfg)):
+        size = len(LEVEL1_AXES[axis])
+        out[axis] = rest % size
+        rest = rest // size
+    return {a: out[a] for a in level1_axes(cfg)}
+
 # Team identity is a confounder in the every-snap graph: a defense's personnel
 # and scheme drive both its calls and its outcomes, and so does the opponent.
 TEAM_STATE = ["defteam", "posteam"]
@@ -102,7 +140,7 @@ def state_columns(cfg: dict) -> tuple[list[str], list[str]]:
     `scm.identify.assert_adjustment_consistency`.
     """
     if action_scheme(cfg) == "level1":
-        return list(NUMERIC_STATE), list(CATEGORICAL_STATE) + TEAM_STATE
+        return list(NUMERIC_STATE) + ["off_team_avg_epa"], list(CATEGORICAL_STATE) + TEAM_STATE
     return list(NUMERIC_STATE), list(CATEGORICAL_STATE)
 
 
@@ -116,8 +154,8 @@ def action_feature_matrix(cfg: dict) -> np.ndarray:
     for the dropback scheme, with shells ordered man/press -> deep zone.
     """
     if action_scheme(cfg) == "level1":
-        ids = np.arange(len(LEVEL1_LABELS))
-        return np.column_stack([ids // N_FRONTS, ids % N_FRONTS]).astype(float)
+        parts = level1_components(np.arange(len(level1_labels(cfg))), cfg)
+        return np.column_stack(list(parts.values())).astype(float)
     ids = np.arange(N_ACTIONS)
     return np.column_stack([ids // 2, ids % 2]).astype(float)
 
@@ -136,7 +174,8 @@ def personnel_db_count(personnel: pd.Series) -> pd.Series:
 
 
 def _label_level1(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
-    """Construct the 12-action personnel-package x front treatment.
+    """Construct the level-1 treatment: personnel package x front (12 actions),
+    or the configured subset of those axes (`action.level1.axes`).
 
     Rows whose personnel does not parse, or that FTN never charted a box count
     for, carry no observed alignment and are dropped rather than guessed.
@@ -159,10 +198,17 @@ def _label_level1(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
                       index=df.index).astype(float)
     front[box.isna()] = np.nan
 
+    # The box count is required even when it is not part of the call: the
+    # sample stays the same whichever axes are configured, so a package-only
+    # and a package x front run answer their questions on the same snaps.
     keep = package.notna() & front.notna()
     df = df[keep].copy()
-    df["action"] = (package[keep] * N_FRONTS + front[keep]).astype(int)
-    df["action_label"] = df["action"].map(LEVEL1_LABELS)
+    component = {"package": package[keep], "front": front[keep]}
+    action = pd.Series(0.0, index=df.index)
+    for axis in level1_axes(cfg):
+        action = action * len(LEVEL1_AXES[axis]) + component[axis]
+    df["action"] = action.astype(int)
+    df["action_label"] = df["action"].map(level1_labels(cfg))
     return df
 
 
@@ -210,14 +256,16 @@ def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
     scheme = action_scheme(cfg)
     if scheme == "level1":
         df = _label_level1(df, cfg)
-        labels = LEVEL1_LABELS
+        labels = level1_labels(cfg)
     else:
         df = _label_actions(df, cfg)
         labels = ACTION_LABELS
     numeric_state, categorical_state = state_columns(cfg)
 
     # ── 3. Pre-snap state features ───────────────────────────────────────────
-    df = _build_state(df, per_offense=(scheme == "level1"))
+    halflife = cfg.get("features", {}).get("offense_quality_halflife_plays",
+                                           OFFENSE_QUALITY_HALFLIFE)
+    df = _build_state(df, per_offense=(scheme == "level1"), quality_halflife=halflife)
 
     # ── 4. Reward ────────────────────────────────────────────────────────────
     df["reward"] = -df["epa"] if cfg["reward"]["negate_epa"] else df["epa"]
@@ -321,7 +369,8 @@ def _label_actions(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     return df
 
 
-def _build_state(df: pd.DataFrame, per_offense: bool = False) -> pd.DataFrame:
+def _build_state(df: pd.DataFrame, per_offense: bool = False,
+                 quality_halflife: float = 250) -> pd.DataFrame:
     """Engineer the pre-snap state vector. No post-snap information allowed."""
 
     # Extract game state data and clean
@@ -350,7 +399,7 @@ def _build_state(df: pd.DataFrame, per_offense: bool = False) -> pd.DataFrame:
         .fillna("UNKNOWN").astype(str).str.upper()
 
     df = _build_ftn_state(df)
-    df = _add_history_features(df, per_offense=per_offense)
+    df = _add_history_features(df, per_offense=per_offense, quality_halflife=quality_halflife)
     return df
 
 
@@ -410,7 +459,8 @@ def assert_ftn_coverage(df: pd.DataFrame, cfg: dict) -> None:
         )
 
 
-def _add_history_features(df: pd.DataFrame, per_offense: bool = False) -> pd.DataFrame:
+def _add_history_features(df: pd.DataFrame, per_offense: bool = False,
+                          quality_halflife: float = 250) -> pd.DataFrame:
     """Strictly-historical rolling features — offense tendency + EPA proxies.
 
     All use an expanding mean shifted one play within time order, so a play's
@@ -440,7 +490,36 @@ def _add_history_features(df: pd.DataFrame, per_offense: bool = False) -> pd.Dat
     df["def_team_avg_epa"] = _expanding_mean(df, "defteam", "epa")
     df["qb_on_field"] = _qb_on_field(df)
     df["qb_avg_epa"] = _expanding_mean(df, "qb_on_field", "epa")
+    if per_offense:
+        # Offense-unit quality: the offense's own EPA per play, recency-weighted.
+        df["off_team_avg_epa"] = _recency_mean(df, "posteam", "epa", quality_halflife)
     return df
+
+
+# Chosen by predictive power, not by taste: on 2022-24 training data, the
+# correlation between an offense's estimate before a game and its EPA/play in
+# that game was 0.284 for a plain expanding mean, 0.262 at a 1-game half-life
+# (mostly noise), and peaked at 0.319 for 250 plays (~4 games) with 500 plays
+# essentially tied — recent form matters, but not only the last game.
+OFFENSE_QUALITY_HALFLIFE = 250
+
+
+def _recency_mean(df: pd.DataFrame, group_col: str, value_col: str,
+                  halflife: float) -> pd.Series:
+    """Leak-free, recency-weighted mean of `value_col` within `group_col`.
+
+    An exponentially weighted mean over the group's earlier plays (half-life in
+    plays), shifted one play so a play's own outcome never enters its estimate.
+    It runs across season boundaries on purpose: a team's first game is
+    estimated from the end of its previous season, decayed, rather than from
+    nothing. Undefined only on a group's very first play, where the league mean
+    (EPA ~ 0) stands in.
+    """
+    if group_col not in df.columns:
+        return pd.Series(0.0, index=df.index)
+    return (df.groupby(group_col)[value_col]
+            .transform(lambda x: x.ewm(halflife=halflife).mean().shift(1))
+            .fillna(0.0))
 
 
 def _qb_on_field(df: pd.DataFrame) -> pd.Series:

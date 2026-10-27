@@ -70,3 +70,13 @@ def fitted_l1_unconfounded():
     one setting where OPE should recover the TRUE policy value, not just the
     behavior policy's empirical mean."""
     return _fit_level1(conf_strength=0.0)
+
+
+@pytest.fixture(scope="session")
+def l1_ensemble(fitted_l1):
+    """A small game-bootstrap Q ensemble on the confounded level-1 fit."""
+    from _config import CFG_L1
+    from src.models.outcome.q_model import fit_q_ensemble
+    cfg = {**CFG_L1, "outcome_model": {**CFG_L1["outcome_model"],
+                                       "ensemble": {"n_boot": 8}}}
+    return fit_q_ensemble(fitted_l1["train"], cfg)

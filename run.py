@@ -36,13 +36,13 @@ from src.data.load import (load_pbp, load_ftn, merge_ftn, ftn_coverage,
 from src.data.features import (action_scheme, assert_ftn_coverage, build_dataset,
                                slice_report, time_aware_split)
 from src.models.behavior.propensity import fit_behavior_model
-from src.models.outcome.q_model import fit_q_model, crossfit_q
+from src.models.outcome.q_model import fit_q_model, crossfit_q, fit_q_ensemble
 from src.ope.direct_method import behavior_recovery_check, dm_policy_value
 from src.ope.doubly_robust import dr_policy_value
 from src.ope.aipw import aipw_contrasts
 from src.ope.ladder import ope_ladder
 from src.ope.sensitivity import sensitivity_bounds, attach as attach_sensitivity
-from src.policy.conservative import learn_conservative_policy
+from src.policy.safe import learn_policy
 from src.evaluation import compare_to_baseline
 
 
@@ -121,6 +121,33 @@ def main(config_path: str, source_override: str | None) -> None:
     est = identify.identify_estimand(model)
     bd = est.get_backdoor_variables() if hasattr(est, "get_backdoor_variables") else []
     print(f"  DoWhy: backdoor-identified via {len(bd)} adjustment variables")
+    graph_checks = None
+    if every_snap and cfg.get("scm", {}).get("ci_tests", False):
+        # CLAUDE.md Step 2: the hand-built graph is validated with conditional-
+        # independence tests. Training seasons only — the holdout stays unseen.
+        from src.scm.ci_tests import alignment_node_columns, check_graph
+        graph_checks = check_graph(train.df, graph, alignment_node_columns(graph))
+        imp = graph_checks[graph_checks["check"] == "implied independence"]
+        edg = graph_checks[graph_checks["check"] == "edge into outcome"]
+        vc = imp["verdict"].value_counts()
+        print(f"  graph checks: {vc.get('consistent', 0)} implied independencies consistent, "
+              f"{vc.get('violated', 0)} violated, {vc.get('untestable', 0)} untestable")
+        for r in imp[imp["verdict"] == "violated"].itertuples():
+            print(f"    VIOLATED {r.claim} | {r.given}  (ΔR² {r.delta_r2:.4f}) -> missing edge")
+        ev = edg["verdict"].value_counts()
+        print(f"  edges into {graph.outcome}: {ev.get('supported', 0)} supported, "
+              f"{ev.get('weak', 0)} weak, {ev.get('unsupported', 0)} unsupported")
+        if cfg["scm"].get("confirm_on_holdout", False):
+            # Structure confirmation ONLY: the graph was revised on training
+            # seasons, so testing it there is circular. The holdout is used to
+            # confirm or refute the structure — never to revise it, and never
+            # for anything the policy learns from.
+            confirm = check_graph(test.df, graph, alignment_node_columns(graph))
+            ci = confirm[confirm["check"] == "implied independence"]["verdict"].value_counts()
+            print(f"  holdout confirmation: {ci.get('consistent', 0)} consistent, "
+                  f"{ci.get('violated', 0)} violated")
+            graph_checks = pd.concat([graph_checks.assign(split="train"),
+                                      confirm.assign(split="holdout")], ignore_index=True)
     pos = identify.check_positivity(train, cfg.get("positivity", {}).get("min_count", 10))
     print(f"  positivity: {pos['pct_cells_supported']:.1%} of (stratum,action) cells "
           f"supported; {pos['n_absent_cells']}/{pos['n_cells']} structurally absent")
@@ -169,8 +196,25 @@ def main(config_path: str, source_override: str | None) -> None:
           f"-> {'PASS' if rec['passes'] else 'FAIL (propensities/OPE suspect)'}")
 
     # ── 6. Policy + holdout evaluation ───────────────────────────────────────
-    _rule("[6/7] Conservative policy + DR evaluation on holdout")
-    policy = learn_conservative_policy(train, q, beh, cfg)
+    _rule("[6/7] Policy + DR evaluation on holdout")
+    ensemble = None
+    safe = cfg["policy"].get("type", "conservative") == "safe"
+    pname = "safe" if safe else "conservative"
+    if safe:
+        ensemble = fit_q_ensemble(train, cfg)
+        print(f"  Q ensemble: {len(ensemble.members)} game-bootstrap refits; the policy "
+              f"keeps the DC's mix unless a call's advantage clears a "
+              f"{cfg['policy']['lcb_kappa']:.2f}-sd lower bound")
+    policy = learn_policy(train, q, beh, cfg, ensemble=ensemble)
+    if safe and getattr(policy, "read_bias", None) is not None:
+        rb_table = policy.read_bias_table
+        print(f"  read allowance (x{policy.allowance_scale:g}): bias of each component from "
+              f"the coordinator's read — excess runs faced x run-minus-pass reward")
+        for _, row in rb_table.iterrows():
+            print(f"    {row['component']:<10} excess run {row['excess_run']:+.3f}  "
+                  f"x gap {row['run_minus_pass']:+.3f}  = {row['bias']:+.4f}/snap")
+        os.makedirs(cfg.get("output_dir", "outputs"), exist_ok=True)
+        rb_table.to_csv(os.path.join(cfg.get("output_dir", "outputs"), "read_bias.csv"), index=False)
     out = policy.act(test.df)
     a_te = test.df[ds.action_col].to_numpy()
     r_te = test.df[ds.reward_col].to_numpy()
@@ -180,7 +224,7 @@ def main(config_path: str, source_override: str | None) -> None:
     v_behavior = dr_policy_value(q_te, pib_te, pib_te, a_te, r_te, weight_clip,
                                  policy_name="behavior", graph_version=gv)
     v_policy = dr_policy_value(q_te, pib_te, out["policy_probs"], a_te, r_te, weight_clip,
-                               policy_name="conservative", graph_version=gv)
+                               policy_name=pname, graph_version=gv)
     print(f"  V_DR(pi_b) on holdout: {v_behavior.value:+.4f}  "
           f"95% CI [{v_behavior.ci95[0]:+.4f}, {v_behavior.ci95[1]:+.4f}]")
     print(f"  V_DR(pi*)  on holdout: {v_policy.value:+.4f}  "
@@ -193,8 +237,15 @@ def main(config_path: str, source_override: str | None) -> None:
     # land on calls the data can vouch for, so report the support directly.
     idx = np.arange(len(a_te))
     pib_chosen = pib_te[idx, out["chosen"]]
-    print(f"  pi* agrees with DC on {float((out['chosen'] == a_te).mean()):.1%} "
-          f"of holdout plays")
+    if safe:
+        dep = ~out["deferred"]
+        print(f"  pi* keeps the DC's own mix on {1 - dep.mean():.1%} of holdout plays; "
+              f"departs on {dep.mean():.1%}")
+        for j, share in pd.Series(out["chosen"][dep]).value_counts(normalize=True).head(4).items():
+            print(f"    departs to {ds.action_labels[int(j)]:<18} {share:.0%} of departures")
+    else:
+        print(f"  pi* agrees with DC on {float((out['chosen'] == a_te).mean()):.1%} "
+              f"of holdout plays")
     print(f"  support of recommendations: mean pi_b(chosen) = {pib_chosen.mean():.3f} "
           f"(DC's own calls: {pib_te[idx, a_te].mean():.3f}); "
           f"{float((pib_chosen < 0.10).mean()):.1%} rest on pi_b < 0.10")
@@ -205,7 +256,7 @@ def main(config_path: str, source_override: str | None) -> None:
         ope_ladder(q_te, pib_te, pib_te, a_te, r_te, weight_clip,
                    policy_name="behavior", graph_version=gv),
         ope_ladder(q_te, pib_te, out["policy_probs"], a_te, r_te, weight_clip,
-                   policy_name="conservative", graph_version=gv),
+                   policy_name=pname, graph_version=gv),
     ], ignore_index=True)
     print("\n  DM -> IPW -> DR ladder on holdout:")
     for pol, grp in ladder.groupby("policy", sort=False):
@@ -219,7 +270,7 @@ def main(config_path: str, source_override: str | None) -> None:
     sens = sensitivity_bounds(q_te, pib_te, out["policy_probs"], a_te, r_te,
                               cfg["sensitivity"]["gamma_range"], weight_clip,
                               compare_value=v_behavior.value,
-                              policy_name="conservative")
+                              policy_name=pname)
     # Bind the bound to the estimate it qualifies, so the saved record carries
     # value + CI + sensitivity + graph version together (CLAUDE.md discipline).
     attach_sensitivity(v_policy, sens)
@@ -232,17 +283,22 @@ def main(config_path: str, source_override: str | None) -> None:
     # plays that took that action, so it is *more* exposed to a tiny
     # propensity than a policy value is, not less.
     by_label = {v: k for k, v in ds.action_labels.items()}
-    baseline = by_label.get(cfg["ope"].get("aipw_baseline"), 0)
+    # Falls back to the most common call when the configured label is not in
+    # the action space (e.g. `nickel_box6` after the box is dropped from it).
+    modal = int(train.df[ds.action_col].mode()[0])
+    baseline = by_label.get(cfg["ope"].get("aipw_baseline"), modal)
     contrasts = aipw_contrasts(q_te, pib_te, a_te, r_te, ds.action_labels,
                                baseline=baseline, weight_clip=weight_clip)
 
     # ── 7. Policy regression gate ────────────────────────────────────────────
     _rule("[7/7] Regression gate — candidate policy vs baseline on the holdout season")
-    cmp = compare_to_baseline(test, q, beh, cfg)
+    cmp = compare_to_baseline(test, q, beh, cfg, ensemble=ensemble, candidate=policy)
     print(cmp.report())
 
     _example_recommendations(ds, test, policy)
     _save_outputs(cfg, ds, q_all_train, v_behavior, v_policy, sens, contrasts, cmp, ladder)
+    if graph_checks is not None:
+        graph_checks.to_csv(f"{cfg.get('output_dir', 'outputs')}/graph_checks.csv", index=False)
 
     if cmp.regressed:
         # CLAUDE.md: "Regressions block merge." Exit non-zero so CI fails.
@@ -274,7 +330,14 @@ def _example_recommendations(ds, test, policy) -> None:
         s = test.df.loc[i]
         print(f"\n  {name}: {int(s['down'])} & {s['ydstogo']:.0f} | {s['formation']} | "
               f"ball on {100 - s['yardline_100']:.0f} | score {s['score_diff']:+.0f}")
-        print(f"    -> recommend: {ds.action_labels[a]}  (Q={q_all[a]:+.3f})")
+        if res.get("deferred") is not None and res["deferred"][0]:
+            print(f"    -> no call clears the bound: keep the usual mix "
+                  f"(most often {ds.action_labels[a]})")
+        elif res.get("q_sd") is not None:
+            print(f"    -> recommend: {ds.action_labels[a]}  (advantage over the usual mix "
+                  f"{res['advantage'][0][a]:+.3f} ± {res['q_sd'][0][a]:.3f})")
+        else:
+            print(f"    -> recommend: {ds.action_labels[a]}  (Q={q_all[a]:+.3f})")
         print(f"       DC actually called: {ds.action_labels[int(s['action'])]}")
         print(f"       supported calls here ({len(supported)}): {', '.join(supported)}")
 

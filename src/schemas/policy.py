@@ -34,7 +34,7 @@ import numpy as np
 import pandas as pd
 
 from .behavior import BehaviorModel
-from .outcome import QModel
+from .outcome import QEnsemble, QModel
 
 
 @dataclass
@@ -100,3 +100,68 @@ class ConservativePolicy:
         probs[np.arange(len(df)), chosen] = 1.0
         return {"q_all": q_all, "pi_b": pi_b, "scores": scores,
                 "support": support, "chosen": chosen, "policy_probs": probs}
+
+
+@dataclass
+class SafeImprovementPolicy:
+    """Defer to the coordinator unless the data establishes a better call.
+
+    In each state, keep the DC's own mix pi_b(.|s) — unless some supported call
+    clears a lower confidence bound on its advantage over that mix:
+
+        LCB(s, a) = [Q(s,a) - sum_a' pi_b(a'|s) Q(s,a')] - kappa * sd_boot(s, a)
+
+    and then switch entirely to the call with the highest LCB. This is the
+    SPIBB idea (safe policy improvement with baseline bootstrapping) in the
+    one-step setting: uncertainty sends the policy back to what the DC does,
+    not to the DC's most frequent call. That distinction matters — a
+    deterministic argmax pushed toward the modal call stops mixing, and on
+    2022-25 that alone cost ~0.01 EPA/play in DR, so the "most pessimistic"
+    deterministic policy was not the safe one.
+
+    Where it defers, the policy IS the behavior policy, so OPE scores those
+    states at the DC's own value with no extrapolation; the estimate rests only
+    on the departures. Built by `src.policy.safe.learn_safe_policy`.
+
+    `chosen` is the headline call: the switched-to call where the policy
+    departs, the DC's most frequent call where it defers. `deferred` says which.
+
+    `read_bias` (per action, reward units; `src.policy.read_bias`) adds a
+    confounding allowance to the bound:
+
+        LCB(s, a) -= allowance_scale * |read_bias[a] - sum_a' pi_b(a'|s) read_bias[a']|
+
+    The bootstrap sd covers sampling noise only; this covers the known bias of
+    the coordinator's read, so a box departure must clear both. None or zeros
+    leave the rule as above.
+    """
+    q: QModel
+    beh: BehaviorModel
+    ensemble: QEnsemble
+    kappa: float
+    support_threshold: float
+    n_actions: int
+    read_bias: np.ndarray | None = None
+    allowance_scale: float = 1.0
+
+    def act(self, df: pd.DataFrame) -> dict:
+        q_all = self.q.predict_all_actions(df)
+        pi_b = self.beh.propensity(df)
+        support = pi_b >= self.support_threshold
+        adv = q_all - (pi_b * q_all).sum(axis=1, keepdims=True)
+        q_sd = self.ensemble.advantage_sd(df, pi_b)
+        allowance = np.zeros_like(adv)
+        if self.read_bias is not None:
+            rb = np.asarray(self.read_bias)[None, :]
+            allowance = self.allowance_scale * np.abs(rb - (pi_b * rb).sum(axis=1, keepdims=True))
+        lcb = np.where(support, adv - self.kappa * q_sd - allowance, -np.inf)
+
+        best = lcb.argmax(axis=1)
+        switch = lcb.max(axis=1) > 0
+        probs = pi_b.copy()
+        probs[switch] = 0.0
+        probs[np.where(switch)[0], best[switch]] = 1.0
+        chosen = np.where(switch, best, pi_b.argmax(axis=1))
+        return {"q_all": q_all, "pi_b": pi_b, "advantage": adv, "q_sd": q_sd,
+                "allowance": allowance, "lcb": lcb, "support": support, "deferred": ~switch,
+                "chosen": chosen, "policy_probs": probs}

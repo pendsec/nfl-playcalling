@@ -230,7 +230,7 @@ see [What the estimand actually is](#what-the-estimand-actually-is) below.
 | πb | `src/models/behavior/` | calibrated LightGBM, cross-fitted around un-splittable classes; confidence/classwise ECE + Brier + ESS-ratio diagnostics |
 | Q | `src/models/outcome/` | per-treatment GBM on reward(−EPA), SCM-selected features, out-of-fold path for honest DR |
 | OPE | `src/ope/` | **doubly-robust** policy value (self-normalized, switch-clipped) + DR recovery smoke test; AIPW contrasts (same clipping, reported with support counts); Rosenbaum sensitivity |
-| Policy | `src/policy/` | conservative behavior-regularized (CQL/IQL-style) policy |
+| Policy | `src/policy/` | conservative behavior-regularized (CQL/IQL-style) policy; safe improvement over the coordinator (every-snap pipeline) |
 | Eval | `src/evaluation/` | policy regression gate: paired DR comparison of the candidate against the baseline policy on the held-out season |
 
 **Built but not wired in:** `src/models/imputation/` treats the coverage shell as
@@ -284,14 +284,34 @@ python run.py --config configs/v3.yaml --source synthetic  # known-SCM alignment
 
 Its walkthrough is
 [`notebooks/v3_pipeline_walkthrough.ipynb`](notebooks/v3_pipeline_walkthrough.ipynb).
+Its policy is a **safe improvement** over the coordinators (`policy.type: safe`,
+`src/policy/safe.py`): in each situation it keeps the coordinators' own mix of
+alignments unless a well-supported alignment's advantage over that mix clears a
+one-sided 99% lower bound, taken from refitting the outcome model on resampled
+games. A box-count departure must also clear an **allowance for the coordinator's
+read** (`policy.read_allowance`, `src/policy/read_bias.py`): heavy boxes face more
+runs than the pre-snap state predicts and light boxes fewer, so each box's edge is
+inflated by about its excess runs × the run-minus-pass value within that box
+(~0.006–0.007 reward/snap at ≤5 and 8+, ~0 at 6), and the policy charges twice
+that. The bound's strength and the allowance's scale were chosen on a fold inside
+the training seasons (fit 2022–23, score 2024), never on the held-out season. The
+box is a separable axis of the call: `action.level1.axes: [package]` makes the
+call the personnel package alone, on the same snaps, and switches the allowance
+off.
+
 Headline so far: the recommended alignment policy is **statistically
 indistinguishable from what coordinators actually call** on the held-out season
-(DR lift +0.001 reward/snap, each value ±0.02), and the ladder of estimators —
-DM, IPW, SNIPW, DR — agrees, so that is a real null rather than a broken
-estimator. The personnel-package effect behaves like a cause (base helps in run
-situations, dime on third-and-long); the box-count effect does not yet — it is
-largest on passing downs, which points at the pressure call rather than run
-fits. The coverage-and-pressure call given the alignment is not modeled yet.
+(it departs on about one snap in sixteen; DR lift −0.003 ± 0.010 reward/snap), and the
+ladder of estimators — DM, IPW, SNIPW, DR — agrees, so that is a real null rather
+than a broken estimator. The departures are almost all toward a heavier box, whose
+edge is stable under resampling but partly reflects the coordinator's read of a
+coming run. The allowance charges for the part of that read the data shows (the
+run/pass channel); the causal graph names the rest — the offense's unrecorded
+plan, which the coordinator's read is a read of — so it is declared rather than
+adjusted away. The personnel package behaves like a cause: its effects are stable
+season to season and it shows no read footprint, and its one clear effect is base
+personnel in run-likely situations (+0.05 reward/snap over nickel); averaged over
+all snaps, and for dime on passing downs, it is indistinguishable from zero. The coverage-and-pressure call given the alignment is not modeled yet.
 
 ### Design decisions, and the failure each one prevents
 

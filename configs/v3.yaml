@@ -35,12 +35,25 @@ action:
       dime_plus: [6, 11]
     # FTN n_defense_box bucket edges: <=5 | 6 | 7 | >=8.
     front_bins: [5, 6, 7]
+    # The axes that make up the call. The box count's effect is confounded by
+    # the coordinator's read (heavy boxes face more runs than the state
+    # predicts; packages do not), so it is guarded by policy.read_allowance.
+    # `[package]` makes the call the package alone (3 actions, same snaps);
+    # the allowance switches itself off and the AIPW baseline falls back to the
+    # most common call.
+    axes: [package, front]
   level2:                     # post-snap-measured; value estimated on charted dropbacks
     blitz_rusher_threshold: 5
     drop_uncharted_coverage: true
 
 reward:
   negate_epa: true
+
+features:
+  # Offense-unit quality = the offense's own EPA/play, exponentially weighted
+  # toward recent snaps. 250 plays (~4 games) best predicted next-game EPA on
+  # 2022-24 (0.319 vs 0.284 for an unweighted history).
+  offense_quality_halflife_plays: 250
 
 # The V2 estimators, with team features added in Phase 1. Hyperparameters start
 # from V2's and are revisited once the pooled data is ~70x larger.
@@ -69,15 +82,32 @@ outcome_model:
   colsample_bytree: 0.8
   min_cell: 20
   cross_fit_folds: 5
+  ensemble:                   # game-bootstrap refits for the safe policy's bound
+    n_boot: 20
 
 policy:
-  alpha: 1.0                  # in units of the Q model's within-state spread
+  # safe: keep the coordinator's own mix unless a supported call's advantage over
+  # it clears a lower confidence bound (bootstrap over games); see
+  # src/policy/safe.py. conservative: deterministic argmax of Q + alpha*log pi_b.
+  type: safe
+  # One-sided 99% bound. Chosen on 2022-23 -> 2024 (never on 2025) from
+  # {0, 0.5, 1, 1.645, 2.326}: the highest DR gain there (+0.0085/play).
+  lcb_kappa: 2.326
+  # The bootstrap bound sees sampling noise, not the read's bias. A box departure
+  # must also clear `scale` x the box's estimated bias relative to the DC's mix
+  # (excess runs faced x run-minus-pass reward, per box; src/policy/read_bias.py:
+  # ~0.006-0.008 at <=5 and 8+, ~0 at 6). Scale chosen on 2022-23 -> 2024 from
+  # {0, 1, 2, 3} with kappa held at 2.326: 2.0 (DR +0.0104 there).
+  read_allowance:
+    axes: [front]
+    scale: 2.0
+  alpha: 1.0                  # conservative policy only: units of Q's within-state spread
   support_threshold: 0.05
 
 ope:
   clip_propensity: [0.01, 0.99]
   weight_clip: 20.0
-  aipw_baseline: nickel_box6  # the modal alignment (~39% of snaps)
+  aipw_baseline: nickel_box6  # the modal alignment (~39% of snaps); modal call if absent
 
 sensitivity:
   gamma_range: [1.0, 1.5, 2.0, 3.0]
@@ -85,13 +115,17 @@ sensitivity:
 positivity:
   min_count: 10
 
+scm:
+  ci_tests: true              # test the graph's independence claims on training data
+  confirm_on_holdout: true    # re-test the (train-revised) structure on 2025 — confirm, never revise
+
 invariance:                   # Phase 3
   environment: team_season    # 96 environments across 2022-2024
   transfer_splits: [leave_one_team_out, leave_one_season_out]
 
 evaluation:
   baseline_name: greedy_baseline
-  candidate_name: conservative_candidate
+  candidate_name: safe_candidate
   regression_margin: 0.02
   # V2 -> V3 gate by projection: marginalize V3's policy over level 1 into a
   # distribution over shell x pressure on SF charted dropbacks in the holdout,

@@ -113,7 +113,7 @@ def test_alignment_graph_routes_the_effect_through_both_mediators():
     may be conditioned on when estimating the alignment's total effect."""
     g = scm.ALIGNMENT_GRAPH
     children = {t for s, t in g.edges if s == g.treatment}
-    assert {scm.OFF_PLAYCALL, scm.DEF_COVERAGE} <= g.mediators <= children
+    assert {scm.OFF_PLAYCALL, scm.DEF_COVERAGE, scm.EXECUTION} <= g.mediators <= children
     assert not g.selection, "no dropback selection on the every-snap sample"
     assert scm.TEAMS in g.adjustment_set()
 
@@ -240,3 +240,215 @@ def test_dr_recovers_the_true_policy_value_without_confounding(fitted_l1_unconfo
     est = dr_policy_value(f["q"].predict_all_actions(d), pib, out["policy_probs"], a,
                           d["reward"].to_numpy(), WEIGHT_CLIP)
     assert est.value == pytest.approx(true_alignment_value(d, out["chosen"]), abs=3 * est.se)
+
+
+# ── Offense-quality proxy ────────────────────────────────────────────────────
+def test_recency_mean_never_sees_the_plays_own_outcome():
+    from src.data.features import _recency_mean
+    df = pd.DataFrame({"posteam": ["A"] * 4, "epa": [0.0, 0.0, 0.0, 100.0]})
+    out = _recency_mean(df, "posteam", "epa", halflife=2)
+    assert out.iloc[3] == pytest.approx(0.0)   # the 100 is this play's own result
+
+
+def test_recency_mean_tracks_a_change_in_form_faster_than_history():
+    """After an offense improves, a recency-weighted estimate must move toward
+    its new level faster than an unweighted history does."""
+    from src.data.features import _expanding_mean, _recency_mean
+    epa = [0.0] * 400 + [0.5] * 100
+    df = pd.DataFrame({"posteam": ["A"] * 500, "epa": epa})
+    recent = _recency_mean(df, "posteam", "epa", halflife=50).iloc[-1]
+    history = _expanding_mean(df, "posteam", "epa").iloc[-1]
+    assert recent > 0.35 > history
+
+
+def test_offense_proxy_tracks_true_offense_quality(fitted_l1):
+    """The simulated league gives each offense a known QB quality; once each
+    offense has some history the proxy should rank offenses by it."""
+    d = fitted_l1["ds"].df
+    late = d.groupby("posteam").tail(200)
+    assert np.corrcoef(late["off_team_avg_epa"], -late["_qb_term"])[0, 1] > 0.8
+
+
+# ── Safe improvement (defer unless the bound clears) ─────────────────────────
+def _safe(f, ensemble, kappa):
+    from src.policy.safe import learn_safe_policy
+    cfg = {**CFG_L1, "policy": {**CFG_L1["policy"], "type": "safe", "lcb_kappa": kappa}}
+    return learn_safe_policy(f["train"], f["q"], f["beh"], cfg, ensemble)
+
+
+def _true_value_of(df, probs):
+    """True value of a possibly stochastic policy on the known SCM."""
+    return float((probs * _true_v(df)).sum(1).mean())
+
+
+def test_ensemble_resamples_whole_games(fitted_l1, l1_ensemble):
+    """Members must differ (it is a bootstrap), and the call the DC makes most
+    is, on average, the least uncertain relative to the DC's mix — it IS most
+    of that mix."""
+    d = fitted_l1["test"].df
+    pib = fitted_l1["beh"].propensity(d)
+    sd = l1_ensemble.advantage_sd(d, pib)
+    assert len(l1_ensemble.members) == 8
+    assert (sd > 0).all()
+    assert sd[np.arange(len(d)), pib.argmax(1)].mean() < sd.mean()
+
+
+def test_safe_policy_is_the_coordinator_where_it_defers(fitted_l1, l1_ensemble):
+    """Deferring means reproducing pi_b exactly — not its modal call — so OPE
+    scores those states at the DC's own value with no extrapolation."""
+    d = fitted_l1["test"].df
+    out = _safe(fitted_l1, l1_ensemble, 2.326).act(d)
+    keep = out["deferred"]
+    assert keep.any() and (~keep).any()
+    np.testing.assert_allclose(out["policy_probs"][keep], out["pi_b"][keep])
+    dep = out["policy_probs"][~keep]
+    assert ((dep == 0) | (dep == 1)).all() and (dep.sum(1) == 1).all()
+    assert (out["lcb"][~keep].max(1) > 0).all()
+
+
+def test_infinite_caution_is_exactly_the_coordinator(fitted_l1, l1_ensemble):
+    d = fitted_l1["test"].df
+    out = _safe(fitted_l1, l1_ensemble, 1e6).act(d)
+    assert out["deferred"].all()
+    np.testing.assert_allclose(out["policy_probs"], out["pi_b"])
+
+
+def test_larger_kappa_departs_less_often(fitted_l1, l1_ensemble):
+    d = fitted_l1["test"].df
+    dep = [(~_safe(fitted_l1, l1_ensemble, k).act(d)["deferred"]).mean()
+           for k in (0.0, 1.0, 2.326)]
+    assert dep[0] >= dep[1] >= dep[2]
+    assert dep[2] < dep[0]
+
+
+def test_safe_policy_beats_the_coordinator_in_truth(fitted_l1, l1_ensemble):
+    """When the effects are real, deferring costs some of the gain but must not
+    turn it into a loss."""
+    d = fitted_l1["test"].df
+    out = _safe(fitted_l1, l1_ensemble, 2.326).act(d)
+    assert _true_value_of(d, out["policy_probs"]) > _true_value_of(d, out["pi_b"])
+
+
+def test_safe_policy_needs_an_ensemble(fitted_l1):
+    from src.policy.safe import learn_policy
+    cfg = {**CFG_L1, "policy": {**CFG_L1["policy"], "type": "safe", "lcb_kappa": 2.0}}
+    with pytest.raises(ValueError, match="ensemble"):
+        learn_policy(fitted_l1["train"], fitted_l1["q"], fitted_l1["beh"], cfg)
+
+
+def test_regression_gate_runs_the_safe_candidate(fitted_l1, l1_ensemble):
+    cfg = {**CFG_L1, "policy": {**CFG_L1["policy"], "type": "safe", "lcb_kappa": 2.326}}
+    cmp = compare_to_baseline(fitted_l1["test"], fitted_l1["q"], fitted_l1["beh"], cfg,
+                              ensemble=l1_ensemble)
+    assert not cmp.regressed, cmp.report()
+
+
+# ── Configurable axes: the box can leave the call with one config line ───────
+def _with_axes(axes):
+    return {**CFG_L1, "action": {**CFG_L1["action"],
+                                 "level1": {**CFG_L1["action"]["level1"], "axes": axes}}}
+
+
+def test_default_axes_reproduce_the_twelve_alignments():
+    from src.data.features import level1_components, level1_labels
+    assert level1_labels(CFG_L1) == LEVEL1_LABELS
+    parts = level1_components(np.arange(12), CFG_L1)
+    np.testing.assert_array_equal(parts["package"], np.arange(12) // 4)
+    np.testing.assert_array_equal(parts["front"], np.arange(12) % 4)
+
+
+def test_package_only_call_keeps_the_same_snaps(fitted_l1):
+    """Dropping the box changes the treatment, not the sample: same rows, and
+    each row's package matches the 12-alignment label's package."""
+    from src.data.features import action_feature_matrix, level1_labels
+    from src.data.load import generate_synthetic_alignment
+    from _config import L1_SEED, N_L1_PLAYS
+    cfg = _with_axes(["package"])
+    pbp = generate_synthetic_alignment(N_L1_PLAYS, seed=L1_SEED,
+                                       seasons=cfg["data"]["seasons"], conf_strength=0.20)
+    ds = build_dataset(pbp, cfg)
+    full = fitted_l1["ds"].df
+    assert ds.n_actions == 3
+    assert level1_labels(cfg) == {0: "base", 1: "nickel", 2: "dime_plus"}
+    assert action_feature_matrix(cfg).shape == (3, 1)
+    assert len(ds.df) == len(full)
+    np.testing.assert_array_equal(ds.df["action"].to_numpy(), full["action"].to_numpy() // 4)
+
+
+def test_unknown_axis_is_rejected():
+    from src.data.features import level1_axes
+    with pytest.raises(ValueError, match="axes"):
+        level1_axes(_with_axes(["coverage"]))
+    with pytest.raises(ValueError, match="axes"):
+        level1_axes(_with_axes([]))
+
+
+# ── Read allowance (the coordinator's-read bias on the box) ──────────────────
+def _allowance_cfg(scale, axes=("package", "front")):
+    cfg = _with_axes(list(axes))
+    return {**cfg, "policy": {**cfg["policy"], "type": "safe", "lcb_kappa": 1.0,
+                              "read_allowance": {"axes": ["front"], "scale": scale}}}
+
+
+def test_read_bias_is_per_box_expanded_to_every_package(fitted_l1):
+    from src.policy.read_bias import estimate_read_bias
+    rb, table = estimate_read_bias(fitted_l1["train"], _allowance_cfg(1.0))
+    assert rb.shape == (12,)
+    assert list(table["component"]) == ["box_le5", "box6", "box7", "box_ge8"]
+    np.testing.assert_allclose(rb, np.tile(table["bias"].to_numpy(), 3))
+    np.testing.assert_allclose(table["bias"], table["excess_run"] * table["run_minus_pass"])
+
+
+def test_allowance_turns_off_when_the_box_leaves_the_call():
+    from src.policy.read_bias import allowance_axes
+    assert allowance_axes(_allowance_cfg(1.0)) == ["front"]
+    assert allowance_axes(_allowance_cfg(1.0, axes=["package"])) == []
+    assert allowance_axes(_allowance_cfg(0.0)) == []
+    assert allowance_axes(CFG_L1) == []
+
+
+def test_allowance_only_ever_raises_the_bar(fitted_l1, l1_ensemble):
+    """A larger allowance can only lower the bound, so the policy departs on a
+    subset of the snaps it departed on before — and zero changes nothing."""
+    from src.policy.safe import learn_safe_policy
+    f, d = fitted_l1, fitted_l1["test"].df
+    base = learn_safe_policy(f["train"], f["q"], f["beh"], _allowance_cfg(0.0), l1_ensemble)
+    pol = learn_safe_policy(f["train"], f["q"], f["beh"], _allowance_cfg(1.0), l1_ensemble)
+    assert base.read_bias is None and pol.read_bias is not None
+    off = base.act(d)
+    deps = []
+    for scale in (0.0, 1.0, 50.0):
+        pol.allowance_scale = scale
+        out = pol.act(d)
+        assert (out["allowance"] >= 0).all()
+        deps.append(~out["deferred"])
+    np.testing.assert_array_equal(deps[0], ~off["deferred"])
+    assert not (deps[1] & ~deps[0]).any() and not (deps[2] & ~deps[1]).any()
+
+
+def test_allowance_is_zero_for_the_coordinators_own_box(fitted_l1, l1_ensemble):
+    """A state where the DC always uses one box gives no allowance to calls
+    with that box: the bias cancels against the mix."""
+    from src.policy.safe import learn_safe_policy
+    f = fitted_l1
+    pol = learn_safe_policy(f["train"], f["q"], f["beh"], _allowance_cfg(1.0), l1_ensemble)
+    pi_b = np.zeros((1, 12)); pi_b[0, [1, 5]] = [0.3, 0.7]      # base/nickel, box 6
+    rb = pol.read_bias[None, :]
+    allow = np.abs(rb - (pi_b * rb).sum(1, keepdims=True))
+    np.testing.assert_allclose(allow[0, [1, 5, 9]], 0.0, atol=1e-12)
+
+
+def test_gate_scores_the_policy_learned_on_training(fitted_l1, l1_ensemble):
+    from src.policy.safe import learn_safe_policy
+    f = fitted_l1
+    cfg = _allowance_cfg(2.0)
+    pol = learn_safe_policy(f["train"], f["q"], f["beh"], cfg, l1_ensemble)
+    cmp = compare_to_baseline(f["test"], f["q"], f["beh"], cfg,
+                              ensemble=l1_ensemble, candidate=pol)
+    np.testing.assert_allclose(cmp.candidate.value,
+                               dr_policy_value(f["q"].predict_all_actions(f["test"].df),
+                                               f["beh"].propensity(f["test"].df),
+                                               pol.act(f["test"].df)["policy_probs"],
+                                               f["test"].df["action"].to_numpy(),
+                                               f["test"].df["reward"].to_numpy(),
+                                               WEIGHT_CLIP).value)

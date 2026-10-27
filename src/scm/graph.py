@@ -207,36 +207,117 @@ SHELL_PRESSURE_GRAPH = CausalGraph(
 TEAMS = "team_identity"          # defense + offense identity (confounder)
 DEF_ALIGNMENT = "def_alignment"  # treatment: personnel package x front
 DEF_COVERAGE = "def_coverage"    # the paired shell x pressure — a MEDIATOR here
+EXECUTION = "execution"          # how the play is actually executed — UNOBSERVED
+
+# Execution is everything decided after the snap: pass rush, coverage technique,
+# blocking, tackling, the QB's accuracy. It is what turns a call and a set of
+# players into a result, so it sits between them and EPA — a mediator of the
+# call's effect and the channel through which player quality reaches the
+# outcome. It is unobserved in play-by-play (tracking data would expose parts of
+# it), and it has a single child, so it adds no testable claim beyond the
+# direct edges it replaces: "X -> execution -> EPA" and "X -> EPA" are
+# indistinguishable from observed data. It is here because it makes the graph
+# say WHY those influences exist — and because realized execution must never be
+# adjusted for when estimating a call's effect, which a named node makes plain.
+#
+# Never a state feature, even where parts of it are recorded (was_pressure,
+# time_to_throw): conditioning on it erases the part of the call's effect that
+# runs through it. Its legitimate use is mediation analysis.
+
+OFF_INTENT = "offense_intent"    # the offense's planned run/pass call — UNOBSERVED
+
+# What the offense means to do before it breaks the huddle. It is never recorded:
+# the run/pass call in the data is what the offense DID, after any check at the
+# line, and it is post-snap. The plan drives the personnel and formation the
+# offense shows and the call it runs — and it is what the coordinator's read is
+# a read OF. That last edge is what makes the plan a confounder of the
+# alignment's effect: alignment <- read <- intent -> run/pass -> execution -> EPA.
+# A coordinator who reads a run stacks the box, and runs are cheap for a
+# defense, so a heavy box is credited with outcomes the read earned.
+#
+# The footprint is observable: deterrence alone predicts heavier boxes face
+# FEWER runs than the state predicts, selection on the plan predicts MORE. On
+# 2022-24 they face more (nickel / 8+ in the box: +10.5 points of run share
+# after adjusting for the state), worth an estimated 0.005-0.01 EPA per snap of
+# the heavy box's apparent edge.
+#
+# Consequences:
+#   * Nothing new to adjust for, so no estimate changes. The adjustment set was
+#     already insufficient (the read was already unobserved); this names how.
+#   * The run/pass call is still a mediator — and now also a descendant of a
+#     confounder. Splitting the alignment's effect by run vs pass conditions on
+#     it and opens alignment <- read <- intent -> run/pass: collider bias.
+#   * Personnel is less exposed than the box. It is set at substitution and
+#     responds to offensive personnel, which is observed; the box is counted at
+#     the snap, after the offense has shown its hand.
+#
+# Parents: the situation, the offense's identity and its players' quality.
+# Deliberately NOT the rolling tendency: tendency -> intent -> personnel would
+# erase the claim personnel _||_ tendency | state, proxies, teams, which the data
+# confirms on 2022-24 and on 2025. The habit the tendency measures already
+# reaches the plan through team identity.
 
 ALIGNMENT_OBSERVED_CONFOUNDERS = OBSERVED_CONFOUNDERS + [TEAMS]
-ALIGNMENT_CONFOUNDER_COLUMNS = {**CONFOUNDER_COLUMNS, TEAMS: ["defteam", "posteam"]}
+ALIGNMENT_CONFOUNDER_COLUMNS = {
+    **CONFOUNDER_COLUMNS,
+    # Offense-unit quality joins the QB and defense proxies: the offense's own
+    # recency-weighted EPA per play (features._recency_mean).
+    PLAYER_PROXIES: CONFOUNDER_COLUMNS[PLAYER_PROXIES] + ["off_team_avg_epa"],
+    TEAMS: ["defteam", "posteam"],
+}
 ALIGNMENT_EDGES = [
     # structure among the pre-snap state
     (GAME_STATE, OFF_PERSONNEL), (GAME_STATE, OFF_FORMATION),
     (GAME_STATE, OFF_TENDENCIES), (OFF_PERSONNEL, OFF_FORMATION),
     (TEAMS, PLAYER_PROXIES),
-    # confounders -> the call, the outcome, and the offense's run/pass choice
-    (GAME_STATE, DEF_ALIGNMENT), (GAME_STATE, EPA), (GAME_STATE, DEF_COVERAGE),
-    (OFF_PERSONNEL, DEF_ALIGNMENT), (OFF_PERSONNEL, EPA), (OFF_PERSONNEL, OFF_PLAYCALL),
-    (OFF_FORMATION, DEF_ALIGNMENT), (OFF_FORMATION, EPA), (OFF_FORMATION, OFF_PLAYCALL),
+    # v3.1 — edges the conditional-independence tests showed missing
+    # (src/scm/ci_tests.py; each rejected with a non-trivial effect on 2022-24):
+    (TEAMS, OFF_TENDENCIES),             # tendency is an offense's own habit
+    (TEAMS, OFF_PERSONNEL), (TEAMS, OFF_FORMATION),   # schemes differ by team
+    (TEAMS, GAME_STATE),                 # better teams lead more often
+    (PLAYER_PROXIES, GAME_STATE),        # CURRENT quality drives the score
+    (PLAYER_PROXIES, OFF_TENDENCIES), (PLAYER_PROXIES, OFF_PERSONNEL),
+    (PLAYER_PROXIES, OFF_FORMATION),
+    (OFF_TENDENCIES, OFF_FORMATION),     # pass-heavy offenses line up in shotgun
+    (GAME_STATE, OFF_PLAYCALL),          # down and distance drive run/pass
+    # confounders -> the call and the offense's run/pass choice
+    (GAME_STATE, DEF_ALIGNMENT), (GAME_STATE, DEF_COVERAGE),
+    (OFF_PERSONNEL, DEF_ALIGNMENT), (OFF_PERSONNEL, OFF_PLAYCALL),
+    (OFF_FORMATION, DEF_ALIGNMENT), (OFF_FORMATION, OFF_PLAYCALL),
     (OFF_TENDENCIES, DEF_ALIGNMENT), (OFF_TENDENCIES, OFF_PLAYCALL),
-    (PLAYER_PROXIES, DEF_ALIGNMENT), (PLAYER_PROXIES, EPA),
-    (TEAMS, DEF_ALIGNMENT), (TEAMS, EPA), (TEAMS, OFF_PLAYCALL),
+    (PLAYER_PROXIES, DEF_ALIGNMENT), (TEAMS, DEF_ALIGNMENT), (TEAMS, OFF_PLAYCALL),
+    # the offense's plan, and the read of it (v3.2)
+    (GAME_STATE, OFF_INTENT), (TEAMS, OFF_INTENT), (PLAYER_PROXIES, OFF_INTENT),
+    (OFF_INTENT, OFF_PERSONNEL), (OFF_INTENT, OFF_FORMATION),
+    (OFF_INTENT, OFF_PLAYCALL), (OFF_INTENT, COACH_READ),
     # the hidden read
-    (COACH_READ, DEF_ALIGNMENT), (COACH_READ, DEF_COVERAGE), (COACH_READ, EPA),
-    # the effect, and the paths it travels
-    (DEF_ALIGNMENT, EPA),
+    (COACH_READ, DEF_ALIGNMENT), (COACH_READ, DEF_COVERAGE), (COACH_READ, EXECUTION),
+    # the call, and the paths its effect travels
     (DEF_ALIGNMENT, OFF_PLAYCALL),       # deterrence
     (DEF_ALIGNMENT, DEF_COVERAGE),       # the coverage paired with the alignment
-    (OFF_PLAYCALL, EPA), (DEF_COVERAGE, EPA),
+    (DEF_ALIGNMENT, EXECUTION),
+    (DEF_COVERAGE, EXECUTION), (OFF_PLAYCALL, EXECUTION),
+    # the players: quality reaches the result through how the play is executed
+    (PLAYER_PROXIES, EXECUTION), (TEAMS, EXECUTION),
+    (OFF_PERSONNEL, EXECUTION), (OFF_FORMATION, EXECUTION),
+    # the result: the situation, and what happened after the snap
+    (GAME_STATE, EPA),                   # field position and down: EPA's arithmetic
+    (EXECUTION, EPA),
 ]
 ALIGNMENT_OBSERVED = (set(ALIGNMENT_OBSERVED_CONFOUNDERS)
                       | {OFF_PLAYCALL, DEF_ALIGNMENT, DEF_COVERAGE, EPA})
-ALIGNMENT_MEDIATORS = {OFF_PLAYCALL, DEF_COVERAGE}
+ALIGNMENT_MEDIATORS = {OFF_PLAYCALL, DEF_COVERAGE, EXECUTION}
 
 # v3.0 — the every-snap alignment graph (new treatment, team confounders, the
 # coverage call and the offense's run/pass choice both mediators, no selection).
-ALIGNMENT_GRAPH_VERSION = "v3.0"
+# v3.1 — ten edges the conditional-independence tests showed missing; execution
+# as an unobserved mediator; offense-unit quality added to the player proxies.
+# Adjustment set unchanged as a set of nodes, so the backdoor logic is intact.
+# v3.2 — the offense's plan as an unobserved node feeding its presentation, its
+# run/pass call and the coordinator's read. Names the confounding path through
+# the run/pass call; the adjustment set is unchanged, and the run/pass claim
+# about player quality becomes untestable (the read now reaches the offense).
+ALIGNMENT_GRAPH_VERSION = "v3.2"
 
 ALIGNMENT_GRAPH = CausalGraph(
     name="personnel package x front, every snap",
@@ -244,7 +325,7 @@ ALIGNMENT_GRAPH = CausalGraph(
     treatment=DEF_ALIGNMENT, outcome=EPA, edges=ALIGNMENT_EDGES,
     observed_confounders=ALIGNMENT_OBSERVED_CONFOUNDERS,
     confounder_columns=ALIGNMENT_CONFOUNDER_COLUMNS,
-    observed=ALIGNMENT_OBSERVED, unobserved=UNOBSERVED,
+    observed=ALIGNMENT_OBSERVED, unobserved=UNOBSERVED | {EXECUTION, OFF_INTENT},
     mediators=ALIGNMENT_MEDIATORS,
     treatment_columns=["defense_personnel", "n_defense_box",
                        "personnel_package", "front"],

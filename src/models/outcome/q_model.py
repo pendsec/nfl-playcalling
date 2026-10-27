@@ -159,6 +159,43 @@ def crossfit_q(ds: Dataset, cfg: dict) -> np.ndarray:
     return mu
 
 
+# ── Uncertainty ──────────────────────────────────────────────────────────────
+def fit_q_ensemble(ds: Dataset, cfg: dict):
+    """Bootstrap ensemble of the configured Q model, resampling whole games.
+
+    Feeds the conservative policy's lower confidence bound. On 2022-25 the
+    point Q gave the 8+ box a flat +0.048 advantage that held-out seasons did not
+    bear out (residual -0.06 on base/8+), while the doubly-robust contrast for
+    the same call carried a 95% CI of ±0.04: the policy was chasing an effect
+    the data could not separate from zero. Penalizing a call by how much its
+    advantage moves across resamples makes the policy leave the coordinator
+    only where the data has established the difference.
+    """
+    from ...schemas.outcome import QEnsemble
+
+    ecfg = cfg["outcome_model"].get("ensemble", {})
+    n_boot = ecfg.get("n_boot", 20)
+    rng = np.random.default_rng(ecfg.get("seed", cfg["seed"]))
+    df = ds.df
+    games = df["game_id"].to_numpy() if "game_id" in df.columns else np.arange(len(df))
+    uniq, inverse = np.unique(games, return_inverse=True)
+    rows_of = np.split(np.argsort(inverse, kind="stable"),
+                       np.cumsum(np.bincount(inverse))[:-1])
+
+    members = []
+    for b in range(n_boot):
+        pick = rng.integers(0, len(uniq), len(uniq))
+        idx = np.concatenate([rows_of[g] for g in pick])
+        boot = Dataset(df=df.iloc[idx].reset_index(drop=True),
+                       numeric_state=ds.numeric_state,
+                       categorical_state=ds.categorical_state,
+                       action_col=ds.action_col, reward_col=ds.reward_col,
+                       n_actions=ds.n_actions, action_labels=ds.action_labels)
+        bcfg = {**cfg, "seed": int(cfg["seed"]) + 1 + b}
+        members.append(fit_q_model(boot, bcfg))
+    return QEnsemble(members=members, n_actions=ds.n_actions)
+
+
 # ── Pooled structure ─────────────────────────────────────────────────────────
 # `outcome_model.structure: pooled` fits ONE regressor on (state, action
 # features) instead of one per action. Measured against a known SCM at the real
