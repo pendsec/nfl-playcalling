@@ -6,6 +6,10 @@ End-to-end: load -> features -> split -> SCM identify + positivity ->
 calibrated pi_b -> per-action GBM Q -> DR smoke test -> conservative policy ->
 DR-OPE (pi_b vs pi*) on holdout + AIPW contrasts + sensitivity -> recommendations.
 
+With configs/v3.yaml it then runs level 2 (coverage x pressure given the
+alignment, on charted dropbacks), scores the factored policy, and gates V3
+against V2 by projection.
+
 Usage:
     python run.py                          # uses configs/v2.yaml (real SF data)
     python run.py --config configs/v2.yaml
@@ -34,6 +38,7 @@ from src.data.load import (load_pbp, load_ftn, merge_ftn, ftn_coverage,
                            generate_synthetic_alignment,
                            generate_synthetic, true_policy_value)
 from src.data.features import (action_scheme, assert_ftn_coverage, build_dataset,
+                               build_level2_dataset, level2_config,
                                slice_report, time_aware_split)
 from src.models.behavior.propensity import fit_behavior_model
 from src.models.outcome.q_model import fit_q_model, crossfit_q, fit_q_ensemble
@@ -68,12 +73,13 @@ def main(config_path: str, source_override: str | None) -> None:
     every_snap = action_scheme(cfg) == "level1"
 
     # ── 1. Data ──────────────────────────────────────────────────────────────
-    _rule("[1/7] Data layer")
+    _rule("[1/9] Data layer")
     if cfg["data"]["source"] == "synthetic":
         if every_snap:
             pbp = generate_synthetic_alignment(cfg["synthetic"]["n_plays"],
                                                cfg["synthetic"]["seed"],
-                                               seasons=cfg["data"]["seasons"])
+                                               seasons=cfg["data"]["seasons"],
+                                               coverage_effects="level2" in cfg["action"])
         else:
             pbp = generate_synthetic(cfg["synthetic"]["n_plays"], cfg["synthetic"]["seed"],
                                      seasons=cfg["data"]["seasons"])
@@ -115,7 +121,7 @@ def main(config_path: str, source_override: str | None) -> None:
           f"holdout={len(test.df):,} (>={cfg['data']['holdout_season']})")
 
     # ── 2. Causal graph + identification ─────────────────────────────────────
-    _rule("[2/7] SCM identification + positivity")
+    _rule("[2/9] SCM identification + positivity")
     print(graph.describe())
     model = identify.build_causal_model(train, graph=graph)
     est = identify.identify_estimand(model)
@@ -155,7 +161,7 @@ def main(config_path: str, source_override: str | None) -> None:
         print(f"    hole: down={cell[0]} dist={cell[1]} action={ds.action_labels[cell[-1]]}")
 
     # ── 3. Behavior model pi_b ───────────────────────────────────────────────
-    _rule("[3/7] Behavior policy pi_b(A|S) — calibrated LightGBM")
+    _rule("[3/9] Behavior policy pi_b(A|S) — calibrated LightGBM")
     beh, diag = fit_behavior_model(train, cfg)
     cal = "isotonic-calibrated" if diag["calibrated"] else \
           f"UNCALIBRATED (rarest call has {diag['min_class_count']} play — too sparse to calibrate)"
@@ -176,7 +182,7 @@ def main(config_path: str, source_override: str | None) -> None:
           f"classwise ECE {diag['classwise_ece']:.3f} | Brier {diag['brier']:.3f}")
 
     # ── 4. Outcome model Q ───────────────────────────────────────────────────
-    _rule("[4/7] Outcome model Q(S,A) — per-action GBM on reward(-EPA)")
+    _rule("[4/9] Outcome model Q(S,A) — per-action GBM on reward(-EPA)")
     q = fit_q_model(train, cfg)
     q_all_train = q.predict_all_actions(train.df)
     print("  mean Q by action (train):")
@@ -184,7 +190,7 @@ def main(config_path: str, source_override: str | None) -> None:
         print(f"    {a:2d} {label:<16} {q_all_train[:, a].mean():+.4f}")
 
     # ── 5. OPE smoke test (doubly robust) ────────────────────────────────────
-    _rule("[5/7] OPE — DR behavior-recovery smoke test (train, cross-fit Q)")
+    _rule("[5/9] OPE — DR behavior-recovery smoke test (train, cross-fit Q)")
     mu_train = crossfit_q(train, cfg)
     rec = behavior_recovery_check(train, q, beh, q_all=mu_train, weight_clip=weight_clip,
                                   graph_version=gv)
@@ -196,7 +202,7 @@ def main(config_path: str, source_override: str | None) -> None:
           f"-> {'PASS' if rec['passes'] else 'FAIL (propensities/OPE suspect)'}")
 
     # ── 6. Policy + holdout evaluation ───────────────────────────────────────
-    _rule("[6/7] Policy + DR evaluation on holdout")
+    _rule("[6/9] Policy + DR evaluation on holdout")
     ensemble = None
     safe = cfg["policy"].get("type", "conservative") == "safe"
     pname = "safe" if safe else "conservative"
@@ -291,18 +297,116 @@ def main(config_path: str, source_override: str | None) -> None:
                                baseline=baseline, weight_clip=weight_clip)
 
     # ── 7. Policy regression gate ────────────────────────────────────────────
-    _rule("[7/7] Regression gate — candidate policy vs baseline on the holdout season")
+    _rule("[7/9] Regression gate — candidate policy vs baseline on the holdout season")
     cmp = compare_to_baseline(test, q, beh, cfg, ensemble=ensemble, candidate=policy)
     print(cmp.report())
 
-    _example_recommendations(ds, test, policy)
+    level2 = None
+    if every_snap and "level2" in cfg["action"]:
+        level2 = _level2(cfg, pbp, ds, policy, weight_clip)
+
+    _example_recommendations(ds, test, policy, level2)
     _save_outputs(cfg, ds, q_all_train, v_behavior, v_policy, sens, contrasts, cmp, ladder)
     if graph_checks is not None:
         graph_checks.to_csv(f"{cfg.get('output_dir', 'outputs')}/graph_checks.csv", index=False)
 
-    if cmp.regressed:
+    gate_v2 = level2["gate"] if level2 else None
+    if cmp.regressed or (gate_v2 is not None and gate_v2.regressed):
         # CLAUDE.md: "Regressions block merge." Exit non-zero so CI fails.
         raise SystemExit(1)
+
+
+def _level2(cfg, pbp, ds1, policy1, weight_clip) -> dict:
+    """Stages 8-9: coverage given the alignment, the factored policy, the V2 gate."""
+    from src.policy.hierarchical import evaluate_factored, fit_dropback_alignment_behavior
+
+    cfg2 = level2_config(cfg)
+    graph2 = scm.graph_for(cfg2)
+    gv2 = graph2.version_tag()
+    out_dir = cfg.get("output_dir", "outputs")
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ── 8. Level 2 ──────────────────────────────────────────────────────────
+    _rule("[8/9] Level 2 — coverage x pressure given the alignment (charted dropbacks)")
+    ds2 = build_level2_dataset(ds1, cfg2)
+    train2, test2 = time_aware_split(ds2, cfg["data"]["holdout_season"])
+    print(f"  {len(ds2.df):,} charted dropbacks ({len(ds2.df) / len(ds1.df):.0%} of snaps), "
+          f"{ds2.n_actions} calls; train={len(train2.df):,} holdout={len(test2.df):,}")
+    shares = pd.crosstab(ds2.df["season"], ds2.df["action_label"], normalize="index")
+    print("  share of each call by season:")
+    print("    " + shares.round(3).to_string().replace("\n", "\n    "))
+    print(graph2.describe())
+    est2 = identify.identify_estimand(identify.build_causal_model(train2, graph=graph2))
+    bd2 = est2.get_backdoor_variables() if hasattr(est2, "get_backdoor_variables") else []
+    print(f"  DoWhy: backdoor-identified via {len(bd2)} adjustment variables "
+          f"(the alignment among them)")
+
+    beh2, diag2 = fit_behavior_model(train2, cfg2)
+    print(f"  pi_b2: accuracy {diag2['oof_accuracy']:.3f} (majority "
+          f"{diag2['majority_baseline']:.3f}), ESS {diag2['ess_ratio']:.3f}, "
+          f"classwise ECE {diag2['classwise_ece']:.3f}")
+    a2 = test2.df["action"].to_numpy()
+    r2 = test2.df["reward"].to_numpy()
+    pib2 = beh2.propensity(test2.df)
+    # Coverage labels are where the charting drifts, so check the propensities
+    # against the season they will weight before trusting them.
+    drift = np.abs(pib2.mean(0) - np.bincount(a2, minlength=ds2.n_actions) / len(a2))
+    print(f"  calibration in the large on the holdout: largest gap "
+          f"{drift.max():.3f} ({ds2.action_labels[int(drift.argmax())]})")
+
+    q2 = fit_q_model(train2, cfg2)
+    ens2 = fit_q_ensemble(train2, cfg2)
+    policy2 = learn_policy(train2, q2, beh2, cfg2, ensemble=ens2)
+    out2 = policy2.act(test2.df)
+    q2_te = out2["q_all"]
+    v_b2 = dr_policy_value(q2_te, pib2, pib2, a2, r2, weight_clip,
+                           policy_name="behavior_level2", graph_version=gv2)
+    v_p2 = dr_policy_value(q2_te, pib2, out2["policy_probs"], a2, r2, weight_clip,
+                           policy_name="safe_level2", graph_version=gv2)
+    dm_lift = float(((out2["policy_probs"] - pib2) * q2_te).sum(1).mean())
+    dep2 = ~out2["deferred"]
+    print(f"  at the coordinator's alignment, pi2 keeps his coverage mix on "
+          f"{1 - dep2.mean():.1%} of holdout dropbacks (bound {cfg2['policy']['lcb_kappa']:.2f} sd)")
+    for j, share in pd.Series(out2["chosen"][dep2]).value_counts(normalize=True).head(3).items():
+        print(f"    departs to {ds2.action_labels[int(j)]:<22} {share:.0%} of departures")
+    print(f"  V_DR(pi_b2) {v_b2.value:+.4f}   V_DR(pi2) {v_p2.value:+.4f}   "
+          f"lift DR {v_p2.value - v_b2.value:+.4f} | DM {dm_lift:+.4f}")
+    sens2 = sensitivity_bounds(q2_te, pib2, out2["policy_probs"], a2, r2,
+                               cfg["sensitivity"]["gamma_range"], weight_clip,
+                               compare_value=v_b2.value, policy_name="safe_level2")
+    attach_sensitivity(v_p2, sens2)
+
+    # ── 9. The factored policy, and the V2 -> V3 gate ───────────────────────
+    _rule("[9/9] Factored policy (alignment x coverage) + V2 -> V3 projection gate")
+    beh1_db, _ = fit_dropback_alignment_behavior(train2, cfg)
+    fac = evaluate_factored(test2.df, cfg, policy1, policy2, beh1_db, beh2, q2, weight_clip)
+    print(f"  per charted dropback, play held a dropback (n={len(test2.df):,}); "
+          f"level 1 departs on {fac['level1_departs']:.1%}, level 2 on "
+          f"{fac['level2_departs']:.1%}")
+    for r in fac["table"].itertuples():
+        print(f"    {r.policy:<15} V_DR {r.value:+.4f}   lift {r.lift:+.4f} ± {1.96 * r.lift_se:.4f}")
+    print("  (level 1's departures earn their value against the run, which a "
+          "per-dropback estimand cannot see)")
+
+    gate = None
+    pg = cfg.get("evaluation", {}).get("projection_gate")
+    if pg and cfg["data"]["source"] != "synthetic":
+        from src.evaluation.projection_gate import projection_gate
+        gate = projection_gate(pbp, cfg, test2.df, fac, graph_version=gv2)
+        print(f"\n  V2 -> V3 on {pg['team']}'s {cfg['data']['holdout_season']} charted dropbacks "
+              f"(V2 refit on the training seasons):")
+        print(gate.report())
+        pd.DataFrame([gate.to_record()]).to_csv(f"{out_dir}/projection_gate.csv", index=False)
+    elif pg:
+        print("  V2 -> V3 gate: skipped on synthetic data (V2 is a one-team pipeline)")
+
+    pd.DataFrame([v_b2.to_record(), v_p2.to_record()]).to_csv(
+        f"{out_dir}/level2_policy_values.csv", index=False)
+    sens2.to_csv(f"{out_dir}/level2_sensitivity.csv", index=False)
+    fac["table"].assign(graph_version=gv2).to_csv(f"{out_dir}/factored_policy.csv", index=False)
+    print(f"\n  saved: {out_dir}/{{level2_policy_values,level2_sensitivity,factored_policy"
+          f"{',projection_gate' if gate else ''}}}.csv")
+    return {"cfg2": cfg2, "ds2": ds2, "policy": policy2, "gate": gate}
 
 
 # Named situations rather than random rows: the recommendations a coordinator
@@ -315,7 +419,7 @@ _SITUATIONS = [
 ]
 
 
-def _example_recommendations(ds, test, policy) -> None:
+def _example_recommendations(ds, test, policy, level2=None) -> None:
     _rule("Example recommendations (holdout states)")
     for name, where in _SITUATIONS:
         pool = test.df[where(test.df)]
@@ -340,6 +444,20 @@ def _example_recommendations(ds, test, policy) -> None:
             print(f"    -> recommend: {ds.action_labels[a]}  (Q={q_all[a]:+.3f})")
         print(f"       DC actually called: {ds.action_labels[int(s['action'])]}")
         print(f"       supported calls here ({len(supported)}): {', '.join(supported)}")
+        if level2 is not None:
+            # The coverage is called before the offense commits, so it is
+            # recommended on every snap — for the alignment just recommended.
+            from src.policy.hierarchical import alignment_frames
+            frame = alignment_frames(row, level2["cfg2"])[a]
+            r2 = level2["policy"].act(frame)
+            c = int(r2["chosen"][0])
+            labels2 = level2["ds2"].action_labels
+            if r2["deferred"][0]:
+                print(f"       coverage: keep the usual mix with it "
+                      f"(most often {labels2[c]})")
+            else:
+                print(f"       coverage: {labels2[c]}  (advantage {r2['advantage'][0][c]:+.3f} "
+                      f"± {r2['q_sd'][0][c]:.3f})")
 
 
 def _save_outputs(cfg, ds, q_all_train, v_behavior, v_policy, sens, contrasts,

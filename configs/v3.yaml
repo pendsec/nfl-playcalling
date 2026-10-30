@@ -3,10 +3,9 @@
 # 2022-2024 train / 2025 held out. Two-level hierarchical action:
 #   level 1 — personnel package x front (12), observed on every snap
 #   level 2 — coverage shell x pressure (12), value estimated on dropbacks
-# This file is the single source of truth for the V3 run.
-#
-# Level 2 (shell x pressure given the alignment) is not wired in yet; this file
-# currently drives the level-1 pipeline end to end.
+# This file is the single source of truth for the V3 run: level 1 on every
+# snap, then level 2 on charted dropbacks, the factored policy, and the V2 -> V3
+# gate.
 
 version: v3
 
@@ -43,8 +42,16 @@ action:
     # most common call.
     axes: [package, front]
   level2:                     # post-snap-measured; value estimated on charted dropbacks
+    # family: Cover-0 / single-high / two-high (the safety structure) x pressure
+    #   = 6 calls. full: the six charted shells x pressure = 12.
+    # Family because the fine labels drift with the charting, not the defenses:
+    # Cover-1's share rose at 30/32 teams 2022->24 (median +18.5 pts) and fell
+    # at 32/32 in 2025 (-15.7). Family shares hold within ~4 pts across seasons.
+    # On real data, full departs 3x as often (7.5%, mostly to Cover-1) for no
+    # DR gain (-0.002 +/- 0.015 vs family -0.004 +/- 0.007).
+    # Coverage off the taxonomy (uncharted, prevent, combo, blown) is dropped.
+    shells: family
     blitz_rusher_threshold: 5
-    drop_uncharted_coverage: true
 
 reward:
   negate_epa: true
@@ -101,6 +108,14 @@ policy:
   read_allowance:
     axes: [front]
     scale: 2.0
+  level2:
+    # The same 99% bound as level 1, NOT tuned on DR: on 2022-23 -> 2024 the
+    # tuning rule picks kappa 0 (departs 95%, DR +0.073 vs DM +0.020). DR far
+    # above DM is what the coordinator's read choosing the coverage and
+    # improving the result produces (one season's noise can too); on the
+    # confounded synthetic SCM DR reads +0.11 where the truth is -0.01 — so DR
+    # on the tuning fold cannot choose it.
+    lcb_kappa: 2.326
   alpha: 1.0                  # conservative policy only: units of Q's within-state spread
   support_threshold: 0.05
 
@@ -127,10 +142,11 @@ evaluation:
   baseline_name: greedy_baseline
   candidate_name: safe_candidate
   regression_margin: 0.02
-  # V2 -> V3 gate by projection: marginalize V3's policy over level 1 into a
-  # distribution over shell x pressure on SF charted dropbacks in the holdout,
-  # then DR-evaluate it with V2's machinery refit on 2022-2024. V3 must not
-  # regress on V2's own question.
+  # V2 -> V3 gate by projection into the joint (alignment x coverage) space on
+  # SF's charted dropbacks in the holdout: V2's coverage policy (refit on
+  # 2022-24, projected onto the level-2 calls) with the coordinator's alignment,
+  # vs V3's factored policy; paired DR with V3's joint Q. V3 must not regress
+  # on V2's own question. See src/evaluation/projection_gate.py.
   projection_gate:
     baseline_config: configs/v2.yaml
     team: SF

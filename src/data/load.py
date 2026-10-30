@@ -425,9 +425,40 @@ def _alignment_components(heavy: np.ndarray, p_run_logit: np.ndarray):
     return p_run, _ALIGN_RUN_GAIN * centred, _ALIGN_PASS_COST * centred
 
 
+# ── Level 2: the coverage paired with the alignment, on passes ──────────────
+# Safety structure on a 0..2 scale (Cover-0, single-high, two-high). The known
+# structure, active only with `coverage_effects=True`:
+#
+#   * the ideal structure deepens with distance to go (`_ideal_structure`);
+#   * a blitz pays more from a heavier alignment (more rushers already near the
+#     line) and less on long yardage;
+#   * the coordinator plays lighter alignments with deeper shells, and his
+#     hidden read pushes both the shell and the blitz — confounding level 2 the
+#     way it confounds level 1;
+#   * coverage acts on passes only (the estimand's own assumption).
+_COV_MISS_COST = 0.05       # reward lost per (structure - ideal)^2
+_FAMILY_SHELLS = {0: ["COVER_0"], 1: ["COVER_1", "COVER_3"],
+                  2: ["COVER_2", "COVER_4", "COVER_6"]}
+
+
+def _ideal_structure(ydstogo: np.ndarray) -> np.ndarray:
+    return 2.0 * _sigmoid((np.asarray(ydstogo, dtype=float) - 7.0) / 3.0)
+
+
+def coverage_effect(ydstogo, heavy, family, blitz) -> np.ndarray:
+    """Reward from the coverage on a pass, given the alignment's heaviness —
+    shared by the generator and the ground truth."""
+    ydstogo = np.asarray(ydstogo, dtype=float)
+    heavy = np.asarray(heavy, dtype=float)
+    miss = -_COV_MISS_COST * (np.asarray(family) - _ideal_structure(ydstogo)) ** 2
+    blitz_gain = 0.03 + 0.04 * (heavy - 2.5) / 2.5 - 0.04 * (ydstogo - 7.0) / 5.0
+    return miss + np.asarray(blitz) * blitz_gain
+
+
 def generate_synthetic_alignment(
     n_plays: int = 12000, seed: int = 11, seasons: list[int] | None = None,
     n_teams: int = 8, conf_strength: float = CONF_STRENGTH,
+    coverage_effects: bool = False,
 ) -> pd.DataFrame:
     """Simulate every-snap play-by-play from a known alignment SCM.
 
@@ -437,6 +468,13 @@ def generate_synthetic_alignment(
     `conf_strength = 0` removes the hidden read's effect on the outcome, so the
     OPE machinery should then recover the TRUE value of a policy, not just the
     empirical mean.
+
+    `coverage_effects=True` adds the level-2 structure above: the coverage and
+    the pressure are called by a known behavior policy and change the reward on
+    passes. It draws from its own random stream, so everything else — and the
+    whole frame when it is off — is identical to the level-1 SCM.
+    `true_alignment_value` ignores coverage and is exact only when it is off;
+    `true_dropback_value` is the level-2 truth.
     """
     rng = np.random.default_rng(seed)
     seasons = list(seasons) if seasons else [2022, 2023, 2024, 2025]
@@ -494,6 +532,29 @@ def generate_synthetic_alignment(
                     [rng.choice([4, 5], n), 6, 7], rng.choice([8, 9], n))
     teams = np.array([f"T{i}" for i in range(n_teams)])
     shells = np.array(COVERAGE_SHELLS)[rng.integers(0, N_SHELLS, n)]
+    rushers = rng.choice([4.0, 5.0], n)
+
+    truth = {}
+    if coverage_effects:
+        rng2 = np.random.default_rng(seed + 7919)
+        team_deep_bias = rng2.normal(0, 0.3, n_teams)
+        fam_all = np.arange(3)[None, :]
+        fam_logits = (-0.8 * (fam_all - _ideal_structure(ydstogo)[:, None]
+                              - team_deep_bias[defteam][:, None]) ** 2
+                      + 0.35 * (fam_all - 1) * coach_read[:, None]
+                      + 0.40 * (fam_all - 1) * ((2.5 - heavy) / 2.5)[:, None])
+        fam_p = np.exp(fam_logits - fam_logits.max(axis=1, keepdims=True))
+        fam_p /= fam_p.sum(axis=1, keepdims=True)
+        family = (rng2.random(n)[:, None] > np.cumsum(fam_p, axis=1)).sum(axis=1).clip(0, 2)
+        p_blitz = _sigmoid(-1.0 + 0.35 * (heavy - 2.5) - 0.15 * (ydstogo - 7) / 3
+                           + 0.30 * coach_read)
+        blitz = (rng2.random(n) < p_blitz).astype(int)
+        pick = rng2.random(n)
+        shells = np.array([_FAMILY_SHELLS[f][int(u * len(_FAMILY_SHELLS[f]))]
+                           for f, u in zip(family, pick)])
+        rushers = np.where(blitz == 1, 5.0, 4.0)
+        reward = reward + np.where(is_run, 0.0, coverage_effect(ydstogo, heavy, family, blitz))
+        truth = {"_heavy": heavy}
 
     return pd.DataFrame({
         "game_id": np.array([f"G{g}" for g in game]),
@@ -514,7 +575,7 @@ def generate_synthetic_alignment(
         "defense_personnel": np.vectorize(_SYN_PERSONNEL.get)(package),
         "defense_coverage_type": np.where(is_run, None, shells),
         "defense_man_zone_type": None,
-        "number_of_pass_rushers": np.where(is_run, np.nan, rng.choice([4.0, 5.0], n)),
+        "number_of_pass_rushers": np.where(is_run, np.nan, rushers),
         "defenders_in_box": box,
         # Only on passes, as in nflfastR.
         "passer_player_id": np.where(is_run, None, np.array([f"QB_{t}" for t in teams[posteam]])),
@@ -529,7 +590,29 @@ def generate_synthetic_alignment(
         "_p_run_logit": p_run_logit,
         "_qb_term": qb_term,
         "_base": base,
+        **truth,
     })
+
+
+def true_dropback_value(df: pd.DataFrame, joint_probs: np.ndarray,
+                        level2_family: np.ndarray) -> float:
+    """Ground-truth per-dropback value of a factored policy (coverage_effects SCM).
+
+    The level-2 estimand: on charted dropbacks, intervene on the alignment and
+    the coverage while the play stays a pass. `joint_probs` is (n, 12 * K2)
+    over joint ids `a1 * K2 + a2`; `level2_family[a2]` is the safety structure
+    (0..2) of level-2 call a2, whose blitz bit is `a2 % 2`. Policies differ in
+    truth only through the pass branch and the coverage term; the read sits at
+    its mean.
+    """
+    k2 = len(level2_family)
+    a1, a2 = np.divmod(np.arange(12 * k2), k2)
+    heavy = alignment_heaviness(a1)[None, :]
+    ytg = df["ydstogo"].to_numpy()[:, None]
+    value = (_ALIGN_PASS_COST * (heavy - 2.5)
+             + coverage_effect(ytg, heavy, np.asarray(level2_family)[a2][None, :], (a2 % 2)[None, :]))
+    return float(((joint_probs * value).sum(axis=1)
+                  + df["_qb_term"].to_numpy() + df["_base"].to_numpy()).mean())
 
 
 def true_alignment_value(df: pd.DataFrame, actions: np.ndarray) -> float:

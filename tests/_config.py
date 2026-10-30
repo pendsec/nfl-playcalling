@@ -54,3 +54,9 @@ CFG_L1 = {
 }
 N_L1_PLAYS = 9000
 L1_SEED = 11
+
+# Level 2 (coverage given the alignment) on the alignment SCM with coverage
+# effects on. Larger than the level-1 slice: only passes reach level 2, and the
+# truth claims are about a gain of ~0.01 per dropback.
+N_L2_PLAYS = 16000
+L2_SEED = 11

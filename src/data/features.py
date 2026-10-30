@@ -70,7 +70,10 @@ CATEGORICAL_STATE = ["formation", "qb_location"]
 #     `scm.identify.assert_adjustment_consistency` has real columns to reject.
 #
 # `test_carried_columns_never_enter_the_state` is what keeps this honest.
-CARRIED_COLUMNS = list(FTN_PRESNAP_DEFENSE) + list(FTN_POSTSNAP) + ["play_type"]
+CARRIED_COLUMNS = (list(FTN_PRESNAP_DEFENSE) + list(FTN_POSTSNAP) + ["play_type"]
+                   # The coverage as played and the rushers who rushed: the
+                   # level-2 action labels, read off the level-1 frame.
+                   + ["defense_coverage_type", "number_of_pass_rushers"])
 
 
 # ── Level-1 action: personnel package x front, on every snap ────────────────
@@ -123,13 +126,122 @@ def level1_components(actions, cfg: dict) -> dict[str, np.ndarray]:
         rest = rest // size
     return {a: out[a] for a in level1_axes(cfg)}
 
+# ── Level-2 action: coverage shell x pressure, given the alignment ─────────
+# Measured post-snap (the coverage as played, the rushers who rushed) and only
+# on charted dropbacks, so its value is estimated there; the alignment it is
+# paired with joins the state.
+#
+# The shell axis is configurable (`action.level2.shells`):
+#   family — Cover-0 / single-high / two-high, the safety structure. Default.
+#   full   — the six charted shells.
+# The default is coarse because the fine labels drift between seasons in a way
+# no defense could: Cover-1's share of charted dropbacks rose at 30 of 32 teams
+# from 2022 to 2024 (median +18.5 pts, man coverage 29% -> 48%) and fell at all
+# 32 in 2025 (median -15.7) — a charting convention moving the Cover-1 / Cover-3
+# boundary, not scheme. The safety structure moves 4-7 pts. Training on 2022-24
+# and evaluating on 2025 crosses that boundary, so a Cover-1-vs-Cover-3
+# recommendation would rest on labels that changed meaning in between.
+SHELL_FAMILIES = ["cover0", "single_high", "two_high"]
+_FAMILY_OF = {"COVER_0": 0, "COVER_1": 1, "COVER_3": 1,
+              "COVER_2": 2, "COVER_4": 2, "COVER_6": 2,
+              # Two deep safeties, man underneath: unambiguous as a structure,
+              # ambiguous as one of the six shells (dropped in `full` mode).
+              "2_MAN": 2}
+LEVEL2_SHELLS = {"family": SHELL_FAMILIES, "full": _SHELL_NAMES}
+
+# The alignment as level-2 state: one ordinal column per configured level-1 axis.
+L1_STATE_COLUMNS = {"package": "l1_package", "front": "l1_front"}
+
+
+def level2_shell_mode(cfg: dict) -> str:
+    """`family` (default) or `full` — see `LEVEL2_SHELLS`."""
+    mode = cfg.get("action", {}).get("level2", {}).get("shells", "family")
+    if mode not in LEVEL2_SHELLS:
+        raise ValueError(f"action.level2.shells must be one of {list(LEVEL2_SHELLS)}, got {mode!r}")
+    return mode
+
+
+def level2_shells(cfg: dict) -> list[str]:
+    return LEVEL2_SHELLS[level2_shell_mode(cfg)]
+
+
+def level2_labels(cfg: dict) -> dict[int, str]:
+    """Level-2 id -> label; id = 2 * shell + blitz, as in the dropback scheme."""
+    return {2 * c + b: f"{name}_{'blitz' if b else 'no_blitz'}"
+            for c, name in enumerate(level2_shells(cfg)) for b in (0, 1)}
+
+
+def level2_alignment_columns(cfg: dict) -> list[str]:
+    """The level-1 call's columns in the level-2 state, one per configured axis."""
+    return [L1_STATE_COLUMNS[a] for a in level1_axes(cfg)]
+
+
+def level2_config(cfg: dict) -> dict:
+    """The configuration the level-2 models run under.
+
+    Same models and OPE settings as level 1; the scheme becomes `level2` (which
+    selects the coverage graph and its adjustment set), and `policy.level2`
+    overrides the policy settings — the read allowance is a level-1 device.
+    """
+    import copy
+    c = copy.deepcopy(cfg)
+    c["action"]["scheme"] = "level2"
+    pol = {k: v for k, v in c["policy"].items() if k not in ("level2", "read_allowance")}
+    c["policy"] = {**pol, **(cfg["policy"].get("level2") or {})}
+    return c
+
+
+def shell_index(coverage: pd.Series, cfg: dict) -> pd.Series:
+    """Charted coverage -> index into `level2_shells(cfg)`; NaN off the taxonomy."""
+    cov = coverage.astype("string").str.upper()
+    if level2_shell_mode(cfg) == "family":
+        return cov.map(_FAMILY_OF).astype(float)
+    return cov.map({name: i for i, name in enumerate(COVERAGE_SHELLS)}).astype(float)
+
+
+def build_level2_dataset(ds1: Dataset, cfg: dict) -> Dataset:
+    """Charted dropbacks from the level-1 dataset, with the level-2 action.
+
+    Built from the level-1 frame rather than from raw play-by-play so every
+    history feature (tendency, quality proxies) is computed over all snaps, as
+    it is for level 1 — a dropback's state does not depend on which stage reads
+    it. Coverage off the taxonomy (uncharted, prevent, combo, blown) is dropped
+    rather than guessed. The level-1 call joins the state as ordinal columns;
+    `l1_action` carries its id.
+    """
+    df = ds1.df[ds1.df["play_type"] == "pass"].copy()
+    shell = shell_index(df["defense_coverage_type"], cfg)
+    df = df[shell.notna()].copy()
+    shell = shell[shell.notna()].astype(int)
+
+    thr = cfg["action"].get("level2", {}).get("blitz_rusher_threshold", 5)
+    rushers = pd.to_numeric(df["number_of_pass_rushers"], errors="coerce").fillna(4)
+    blitz = (rushers >= thr).astype(int)
+
+    df["l1_action"] = df[ds1.action_col].astype(int)
+    for axis, comp in level1_components(df["l1_action"].to_numpy(), cfg).items():
+        df[L1_STATE_COLUMNS[axis]] = comp.astype(float)
+    labels = level2_labels(cfg)
+    df["action"] = (shell * 2 + blitz).to_numpy()
+    df["action_label"] = df["action"].map(labels)
+
+    return Dataset(
+        df=df.reset_index(drop=True),
+        numeric_state=list(ds1.numeric_state) + level2_alignment_columns(cfg),
+        categorical_state=list(ds1.categorical_state),
+        action_col="action", reward_col=ds1.reward_col,
+        n_actions=len(labels), action_labels=labels,
+    )
+
+
 # Team identity is a confounder in the every-snap graph: a defense's personnel
 # and scheme drive both its calls and its outcomes, and so does the opponent.
 TEAM_STATE = ["defteam", "posteam"]
 
 
 def action_scheme(cfg: dict) -> str:
-    """`shell_pressure` (charted dropbacks) or `level1` (every snap)."""
+    """`shell_pressure` (charted dropbacks), `level1` (every snap), or `level2`
+    (coverage x pressure given the alignment, charted dropbacks)."""
     return cfg.get("action", {}).get("scheme", "shell_pressure")
 
 
@@ -139,8 +251,12 @@ def state_columns(cfg: dict) -> tuple[list[str], list[str]]:
     Must equal the adjustment set of `scm.graph_for(cfg)` — asserted by
     `scm.identify.assert_adjustment_consistency`.
     """
-    if action_scheme(cfg) == "level1":
-        return list(NUMERIC_STATE) + ["off_team_avg_epa"], list(CATEGORICAL_STATE) + TEAM_STATE
+    scheme = action_scheme(cfg)
+    if scheme in ("level1", "level2"):
+        numeric = list(NUMERIC_STATE) + ["off_team_avg_epa"]
+        if scheme == "level2":
+            numeric += level2_alignment_columns(cfg)
+        return numeric, list(CATEGORICAL_STATE) + TEAM_STATE
     return list(NUMERIC_STATE), list(CATEGORICAL_STATE)
 
 
@@ -156,6 +272,9 @@ def action_feature_matrix(cfg: dict) -> np.ndarray:
     if action_scheme(cfg) == "level1":
         parts = level1_components(np.arange(len(level1_labels(cfg))), cfg)
         return np.column_stack(list(parts.values())).astype(float)
+    if action_scheme(cfg) == "level2":
+        ids = np.arange(len(level2_labels(cfg)))
+        return np.column_stack([ids // 2, ids % 2]).astype(float)
     ids = np.arange(N_ACTIONS)
     return np.column_stack([ids // 2, ids % 2]).astype(float)
 

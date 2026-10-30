@@ -12,8 +12,10 @@ pipeline recovers the truth) lives in tests/, where pytest can gate on it.
 from .version_compare import (
     VersionComparison,
     compare_policies,
+    compare_policy_arrays,
     compare_to_baseline,
     to_frame,
 )
 
-__all__ = ["VersionComparison", "compare_policies", "compare_to_baseline", "to_frame"]
+__all__ = ["VersionComparison", "compare_policies", "compare_policy_arrays",
+           "compare_to_baseline", "to_frame"]

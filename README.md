@@ -230,8 +230,8 @@ see [What the estimand actually is](#what-the-estimand-actually-is) below.
 | πb | `src/models/behavior/` | calibrated LightGBM, cross-fitted around un-splittable classes; confidence/classwise ECE + Brier + ESS-ratio diagnostics |
 | Q | `src/models/outcome/` | per-treatment GBM on reward(−EPA), SCM-selected features, out-of-fold path for honest DR |
 | OPE | `src/ope/` | **doubly-robust** policy value (self-normalized, switch-clipped) + DR recovery smoke test; AIPW contrasts (same clipping, reported with support counts); Rosenbaum sensitivity |
-| Policy | `src/policy/` | conservative behavior-regularized (CQL/IQL-style) policy; safe improvement over the coordinator (every-snap pipeline) |
-| Eval | `src/evaluation/` | policy regression gate: paired DR comparison of the candidate against the baseline policy on the held-out season |
+| Policy | `src/policy/` | conservative behavior-regularized (CQL/IQL-style) policy; safe improvement over the coordinator, alignment then coverage, scored as one factored policy (every-snap pipeline) |
+| Eval | `src/evaluation/` | policy regression gate: paired DR comparison of the candidate against the baseline policy on the held-out season; projection gate between the one-defense and every-snap pipelines |
 
 **Built but not wired in:** `src/models/imputation/` treats the coverage shell as
 a *latent* treatment label — charted on ~94% of dropbacks but ~3% of runs — and
@@ -311,7 +311,28 @@ plan, which the coordinator's read is a read of — so it is declared rather tha
 adjusted away. The personnel package behaves like a cause: its effects are stable
 season to season and it shows no read footprint, and its one clear effect is base
 personnel in run-likely situations (+0.05 reward/snap over nickel); averaged over
-all snaps, and for dime on passing downs, it is indistinguishable from zero. The coverage-and-pressure call given the alignment is not modeled yet.
+all snaps, and for dime on passing downs, it is indistinguishable from zero.
+
+With the alignment set, it then recommends the **coverage and pressure** to go
+with it — called as safety structure (Cover-0 / single-high / two-high) × blitz
+or not, six calls (`action.level2`; `shells: full` gives the six charted shells).
+The finer labels drift with the charting rather than with the defenses: Cover-1's
+share rose at 30 of 32 defenses from 2022 to 2024 and fell at all 32 in 2025,
+while the safety structure barely moves. The coverage is valued on charted
+dropbacks, where it is observed, with the alignment in the state
+(`scm.graph.coverage_graph`), and it too keeps the coordinators' mix unless the
+same 99% bound clears: it departs on about 2% of dropbacks, DR lift −0.004 ±
+0.007. That bound is fixed rather than tuned, because tuning it on DR fails here:
+DR rose to several times what the outcome model claimed — what the coordinator's
+read would produce by both choosing the coverage and improving the result, and
+what a simulated league with that read reproduces (DR +0.11 where the truth is
+−0.01).
+
+The two levels are scored together per charted dropback
+(`src/policy/hierarchical.py`), and the whole is gated against the one-defense
+coverage pipeline by projecting both into alignment × coverage on that defense's
+held-out dropbacks (`src/evaluation/projection_gate.py`): no regression, on a
+sample too small to show a difference under about ±0.16 per dropback.
 
 ### Design decisions, and the failure each one prevents
 

@@ -135,11 +135,30 @@ def compare_policies(
     are treated as not worth blocking on regardless of significance.
     """
     df = ds.df
-    actions = df[ds.action_col].to_numpy()
-    rewards = df[ds.reward_col].to_numpy()
-    q_all = q.predict_all_actions(df)
-    pi_b = beh.propensity(df)
+    return compare_policy_arrays(
+        q.predict_all_actions(df), beh.propensity(df),
+        df[ds.action_col].to_numpy(), df[ds.reward_col].to_numpy(),
+        baseline_probs, candidate_probs, weight_clip=weight_clip, margin=margin,
+        baseline_name=baseline_name, candidate_name=candidate_name,
+        graph_version=graph_version)
 
+
+def compare_policy_arrays(
+    q_all: np.ndarray,
+    pi_b: np.ndarray,
+    actions: np.ndarray,
+    rewards: np.ndarray,
+    baseline_probs: np.ndarray,
+    candidate_probs: np.ndarray,
+    weight_clip: float = 20.0,
+    margin: float = 0.02,
+    baseline_name: str = "baseline",
+    candidate_name: str = "candidate",
+    graph_version: str | None = None,
+) -> VersionComparison:
+    """`compare_policies` on precomputed nuisances — for action spaces no single
+    fitted model spans, such as the factored alignment x coverage space, whose
+    Q and propensities are assembled from the two levels' models."""
     base_scores = dr_per_play(q_all, pi_b, baseline_probs, actions, rewards,
                               weight_clip=weight_clip)
     cand_scores = dr_per_play(q_all, pi_b, candidate_probs, actions, rewards,

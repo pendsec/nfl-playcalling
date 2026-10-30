@@ -334,6 +334,55 @@ ALIGNMENT_GRAPH = CausalGraph(
 )
 
 
+# ── Level-2 graph: coverage shell x pressure, given the alignment ─────────
+# The same structure as the alignment graph, read for a different treatment.
+#
+#   * Treatment: def_coverage. The alignment it is paired with is now a
+#     CONFOUNDER — it drives the coverage call (alignment -> coverage) and the
+#     result (alignment -> execution) — so it joins the adjustment set, as the
+#     columns of whichever level-1 axes are configured. Under a package-only
+#     level 1 the box count is not part of the call: it is then a sibling of the
+#     coverage (a single-high shell puts a safety in the box) and must not be
+#     adjusted for, which `def_choice_columns` enforces.
+#   * Selection returns. Coverage is valued where it is charted — dropbacks —
+#     so coverage_charted (child of the run/pass call and of the outcome) is
+#     selected on, exactly as in the dropback graph. The estimand is per charted
+#     dropback.
+#   * No coverage -> run/pass edge. The shell is called before the offense
+#     commits, and a shown shell can move a check at the line; that channel is
+#     assumed negligible or absorbed by level 1, and it is what the dropback
+#     selection would block. Stated, not tested — the shell is not observed on
+#     runs.
+#   * The coordinator's read reaches the coverage call (read -> coverage), so
+#     the effect is identified only up to the read, as at level 1.
+COVERAGE_GRAPH_VERSION = "v3.2"
+
+
+def coverage_graph(cfg: dict) -> CausalGraph:
+    """The level-2 graph; its alignment columns follow `action.level1.axes`."""
+    from ..data.features import level2_alignment_columns
+
+    return CausalGraph(
+        name="coverage shell x pressure given the alignment, charted dropbacks",
+        version=COVERAGE_GRAPH_VERSION,
+        treatment=DEF_COVERAGE, outcome=EPA,
+        edges=ALIGNMENT_EDGES + [(OFF_PLAYCALL, CHARTED), (EPA, CHARTED)],
+        observed_confounders=ALIGNMENT_OBSERVED_CONFOUNDERS + [DEF_ALIGNMENT],
+        confounder_columns={**ALIGNMENT_CONFOUNDER_COLUMNS,
+                            DEF_ALIGNMENT: level2_alignment_columns(cfg)},
+        observed=ALIGNMENT_OBSERVED | {CHARTED},
+        unobserved=UNOBSERVED | {EXECUTION, OFF_INTENT},
+        mediators={EXECUTION},
+        selection=SELECTION,
+        defensive_choice={DEF_FRONT},
+        def_choice_columns=DEF_CHOICE_COLUMNS,
+        treatment_columns=["defense_coverage_type", "number_of_pass_rushers",
+                           "defense_man_zone_type"],
+        sample_note=("per charted dropback: the alignment is given, and the "
+                     "shell's effect on whether the offense runs is outside it"),
+    )
+
+
 def graph_for(cfg: dict) -> CausalGraph:
     """The graph a configuration's estimates are made under.
 
@@ -344,6 +393,8 @@ def graph_for(cfg: dict) -> CausalGraph:
     scheme = cfg.get("action", {}).get("scheme", "shell_pressure")
     if scheme == "level1":
         return ALIGNMENT_GRAPH
+    if scheme == "level2":
+        return coverage_graph(cfg)
     if scheme == "shell_pressure":
         return SHELL_PRESSURE_GRAPH
     raise ValueError(f"unknown action scheme {scheme!r}")
