@@ -91,6 +91,29 @@ outcome_model:
   cross_fit_folds: 5
   ensemble:                   # game-bootstrap refits for the safe policy's bound
     n_boot: 20
+  # Neural alternative (src/models/outcome/neural.py; needs torch). The factored
+  # DragonNet ties this GBM on the real holdout's doubly-robust loss, but its
+  # game-bootstrap spread is too tight for the safe policy (it departs ~2.5x as
+  # often, -0.012 +/- 0.008 on 2025), so it is not the default; see
+  # experiments/outcome_models/. To switch, add:
+  #   type: dragonnet           # lightgbm (default) | tarnet | dragonnet
+  #   neural:
+  #     heads: factored         # factored (default) | separate
+  #     hidden: [128, 64]       # the state representation phi(s)
+  #     head_hidden: 32
+  #     dropout: 0.1
+  #     lr: 0.001
+  #     weight_decay: 0.0001
+  #     batch_size: 1024
+  #     max_epochs: 60
+  #     patience: 5             # early stopping on held-out games
+  #     val_frac: 0.1
+  #     alpha: 1.0              # DragonNet: weight of the propensity head
+  #     beta: 1.0               # DragonNet: weight of targeted regularization
+  #     embed_max: 8            # widest categorical embedding
+  #     early_stop: loss        # loss | outcome (Q's error alone)
+  # These are tuned values: a 48-config search kept the defaults (a flatter
+  # net won on 2024 and lost it on 2025; experiments/dragonnet_tuning/).
 
 policy:
   # safe: keep the coordinator's own mix unless a supported call's advantage over
@@ -134,8 +157,20 @@ scm:
   ci_tests: true              # test the graph's independence claims on training data
   confirm_on_holdout: true    # re-test the (train-revised) structure on 2025 — confirm, never revise
 
-invariance:                   # Phase 3
+invariance:                   # src/evaluation/{invariance,transfer}.py; training seasons only
   environment: team_season    # 96 environments across 2022-2024
+  crossfit_folds: 5           # nuisances out of fold by game, for every snap scored
+  # The test: per component contrast (vs the most common component), Q's miss
+  # on the snaps that took it minus its miss on the reference, per environment.
+  # Null calibrated by permuting games across environments — the clustered SEs
+  # understate the noise ~1.5-2x at ~17 games per environment.
+  n_permutations: 500
+  min_taken: 30               # an environment needs this many of each component
+  alpha: 0.05                 # Bonferroni over the contrasts
+  min_tau: 0.02               # the regression margin: smaller spreads are not acted on
+  # Leave-one-team-out (32 refits) and leave-one-season-out (3): ~1 hour, so
+  # off by default; `python run.py --config configs/v3.yaml --transfer`.
+  run_transfer: false
   transfer_splits: [leave_one_team_out, leave_one_season_out]
 
 evaluation:

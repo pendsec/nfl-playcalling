@@ -7,8 +7,9 @@ calibrated pi_b -> per-action GBM Q -> DR smoke test -> conservative policy ->
 DR-OPE (pi_b vs pi*) on holdout + AIPW contrasts + sensitivity -> recommendations.
 
 With configs/v3.yaml it then runs level 2 (coverage x pressure given the
-alignment, on charted dropbacks), scores the factored policy, and gates V3
-against V2 by projection.
+alignment, on charted dropbacks), scores the factored policy, gates V3 against
+V2 by projection, and tests whether the call's effects are invariant across
+team-seasons (with --transfer, also leave-one-team/season-out evaluation).
 
 Usage:
     python run.py                          # uses configs/v2.yaml (real SF data)
@@ -16,6 +17,7 @@ Usage:
     python run.py --source synthetic       # known-SCM data, no network
     python run.py --config configs/v3.yaml # every defense, every snap:
                                            # personnel package x front
+    python run.py --config configs/v3.yaml --transfer   # + transfer (~1 hour)
 """
 
 from __future__ import annotations
@@ -60,7 +62,7 @@ def _rule(title: str) -> None:
     print("\n" + "=" * 70 + f"\n  {title}\n" + "=" * 70)
 
 
-def main(config_path: str, source_override: str | None) -> None:
+def main(config_path: str, source_override: str | None, transfer: bool = False) -> None:
     cfg = load_config(config_path)
     if source_override:
         cfg["data"]["source"] = source_override
@@ -73,7 +75,7 @@ def main(config_path: str, source_override: str | None) -> None:
     every_snap = action_scheme(cfg) == "level1"
 
     # ── 1. Data ──────────────────────────────────────────────────────────────
-    _rule("[1/9] Data layer")
+    _rule("[1/10] Data layer")
     if cfg["data"]["source"] == "synthetic":
         if every_snap:
             pbp = generate_synthetic_alignment(cfg["synthetic"]["n_plays"],
@@ -121,7 +123,7 @@ def main(config_path: str, source_override: str | None) -> None:
           f"holdout={len(test.df):,} (>={cfg['data']['holdout_season']})")
 
     # ── 2. Causal graph + identification ─────────────────────────────────────
-    _rule("[2/9] SCM identification + positivity")
+    _rule("[2/10] SCM identification + positivity")
     print(graph.describe())
     model = identify.build_causal_model(train, graph=graph)
     est = identify.identify_estimand(model)
@@ -161,7 +163,7 @@ def main(config_path: str, source_override: str | None) -> None:
         print(f"    hole: down={cell[0]} dist={cell[1]} action={ds.action_labels[cell[-1]]}")
 
     # ── 3. Behavior model pi_b ───────────────────────────────────────────────
-    _rule("[3/9] Behavior policy pi_b(A|S) — calibrated LightGBM")
+    _rule("[3/10] Behavior policy pi_b(A|S) — calibrated LightGBM")
     beh, diag = fit_behavior_model(train, cfg)
     cal = "isotonic-calibrated" if diag["calibrated"] else \
           f"UNCALIBRATED (rarest call has {diag['min_class_count']} play — too sparse to calibrate)"
@@ -182,7 +184,7 @@ def main(config_path: str, source_override: str | None) -> None:
           f"classwise ECE {diag['classwise_ece']:.3f} | Brier {diag['brier']:.3f}")
 
     # ── 4. Outcome model Q ───────────────────────────────────────────────────
-    _rule("[4/9] Outcome model Q(S,A) — per-action GBM on reward(-EPA)")
+    _rule("[4/10] Outcome model Q(S,A) — per-action GBM on reward(-EPA)")
     q = fit_q_model(train, cfg)
     q_all_train = q.predict_all_actions(train.df)
     print("  mean Q by action (train):")
@@ -190,7 +192,7 @@ def main(config_path: str, source_override: str | None) -> None:
         print(f"    {a:2d} {label:<16} {q_all_train[:, a].mean():+.4f}")
 
     # ── 5. OPE smoke test (doubly robust) ────────────────────────────────────
-    _rule("[5/9] OPE — DR behavior-recovery smoke test (train, cross-fit Q)")
+    _rule("[5/10] OPE — DR behavior-recovery smoke test (train, cross-fit Q)")
     mu_train = crossfit_q(train, cfg)
     rec = behavior_recovery_check(train, q, beh, q_all=mu_train, weight_clip=weight_clip,
                                   graph_version=gv)
@@ -202,7 +204,7 @@ def main(config_path: str, source_override: str | None) -> None:
           f"-> {'PASS' if rec['passes'] else 'FAIL (propensities/OPE suspect)'}")
 
     # ── 6. Policy + holdout evaluation ───────────────────────────────────────
-    _rule("[6/9] Policy + DR evaluation on holdout")
+    _rule("[6/10] Policy + DR evaluation on holdout")
     ensemble = None
     safe = cfg["policy"].get("type", "conservative") == "safe"
     pname = "safe" if safe else "conservative"
@@ -297,13 +299,16 @@ def main(config_path: str, source_override: str | None) -> None:
                                baseline=baseline, weight_clip=weight_clip)
 
     # ── 7. Policy regression gate ────────────────────────────────────────────
-    _rule("[7/9] Regression gate — candidate policy vs baseline on the holdout season")
+    _rule("[7/10] Regression gate — candidate policy vs baseline on the holdout season")
     cmp = compare_to_baseline(test, q, beh, cfg, ensemble=ensemble, candidate=policy)
     print(cmp.report())
 
     level2 = None
     if every_snap and "level2" in cfg["action"]:
         level2 = _level2(cfg, pbp, ds, policy, weight_clip)
+
+    if every_snap and "invariance" in cfg:
+        _invariance(cfg, train, transfer or cfg["invariance"].get("run_transfer", False))
 
     _example_recommendations(ds, test, policy, level2)
     _save_outputs(cfg, ds, q_all_train, v_behavior, v_policy, sens, contrasts, cmp, ladder)
@@ -327,7 +332,7 @@ def _level2(cfg, pbp, ds1, policy1, weight_clip) -> dict:
     os.makedirs(out_dir, exist_ok=True)
 
     # ── 8. Level 2 ──────────────────────────────────────────────────────────
-    _rule("[8/9] Level 2 — coverage x pressure given the alignment (charted dropbacks)")
+    _rule("[8/10] Level 2 — coverage x pressure given the alignment (charted dropbacks)")
     ds2 = build_level2_dataset(ds1, cfg2)
     train2, test2 = time_aware_split(ds2, cfg["data"]["holdout_season"])
     print(f"  {len(ds2.df):,} charted dropbacks ({len(ds2.df) / len(ds1.df):.0%} of snaps), "
@@ -377,7 +382,7 @@ def _level2(cfg, pbp, ds1, policy1, weight_clip) -> dict:
     attach_sensitivity(v_p2, sens2)
 
     # ── 9. The factored policy, and the V2 -> V3 gate ───────────────────────
-    _rule("[9/9] Factored policy (alignment x coverage) + V2 -> V3 projection gate")
+    _rule("[9/10] Factored policy (alignment x coverage) + V2 -> V3 projection gate")
     beh1_db, _ = fit_dropback_alignment_behavior(train2, cfg)
     fac = evaluate_factored(test2.df, cfg, policy1, policy2, beh1_db, beh2, q2, weight_clip)
     print(f"  per charted dropback, play held a dropback (n={len(test2.df):,}); "
@@ -417,6 +422,60 @@ _SITUATIONS = [
     ("1st & 10", lambda d: (d["down"] == 1) & (d["ydstogo"] == 10)),
     ("3rd & long", lambda d: (d["down"] == 3) & (d["ydstogo"] >= 8)),
 ]
+
+
+def _invariance(cfg, train, transfer: bool) -> None:
+    """Stage 10: do the call's effects differ across team-seasons, and does the
+    policy transfer to a defense or season it never saw? Training seasons only."""
+    from src.evaluation.invariance import (cluster_ids, environment_ids, invariance_test,
+                                           pooled_effects)
+    from src.evaluation.transfer import (crossfit_nuisances, summarize_transfer,
+                                         transfer_evaluation)
+
+    _rule("[10/10] Invariance across team-seasons" + (" + transfer" if transfer else ""))
+    df = train.df
+    n_env = environment_ids(df, cfg).nunique()
+    print(f"  environments: {n_env} ({cfg['invariance'].get('environment', 'team_season')}), "
+          f"training seasons only; nuisances cross-fitted by game")
+    nu = crossfit_nuisances(train, cfg, with_policy=transfer)
+    a, r = df[train.action_col].to_numpy(), df[train.reward_col].to_numpy()
+    eff = pooled_effects(nu["q_all"], nu["pi_b"], a, r, df["game_id"].to_numpy(), cfg)
+    table, per_env, needed = invariance_test(nu["q_all"], nu["pi_b"], a, r,
+                                             environment_ids(df, cfg).to_numpy(),
+                                             cluster_ids(df), cfg, effects=eff)
+    print("  component contrasts (DR over all environments; spread across them):")
+    for row in table.itertuples():
+        print(f"    {row.contrast:<20} effect {row.effect:+.4f} ± {row.effect_se:.4f} | "
+              f"Q varies it sd {row.modeled_sd:.4f} | unmodeled tau {row.unmodeled_tau:.4f} "
+              f"(p {row.p:.3f}, phi {row.phi:.2f}, {row.n_env} env) -> {row.verdict}")
+    print(f"  invariance penalty {'NEEDED' if needed else 'not needed'}: "
+          f"{'a contrast varies' if needed else 'no contrast'} beyond tau "
+          f"{cfg['invariance'].get('min_tau', cfg['evaluation']['regression_margin']):.3f} "
+          f"at the Bonferroni level")
+
+    out_dir = cfg.get("output_dir", "outputs")
+    os.makedirs(out_dir, exist_ok=True)
+    table.to_csv(f"{out_dir}/invariance.csv", index=False)
+    per_env.to_csv(f"{out_dir}/invariance_by_environment.csv", index=False)
+    saved = "invariance,invariance_by_environment"
+    if transfer:
+        tr = transfer_evaluation(train, cfg, nu)
+        summary = summarize_transfer(tr)
+        print("\n  transfer: the policy refit without the group, scored on it "
+              "(lift over the coordinator; anchored = the same departures, deferring "
+              "to the group's own mix; gap vs the in-domain policy)")
+        for row in summary.itertuples():
+            print(f"    {row.split:<22} {row.groups:>2} groups  departs {row.departs:.1%}  "
+                  f"lift {row.lift:+.4f} ± {row.lift_se:.4f} (tau {row.lift_tau:.4f})  "
+                  f"anchored {row.lift_anchored:+.4f} ± {row.lift_anchored_se:.4f}  "
+                  f"gap {row.gap:+.4f} ± {row.gap_se:.4f}  "
+                  f"regress {row.n_regress}  worst {row.worst} {row.worst_lift:+.4f}")
+        tr.to_csv(f"{out_dir}/transfer.csv", index=False)
+        summary.to_csv(f"{out_dir}/transfer_summary.csv", index=False)
+        saved += ",transfer,transfer_summary"
+    else:
+        print("  transfer (leave one team / season out, ~1 hour): run with --transfer")
+    print(f"\n  saved: {out_dir}/{{{saved}}}.csv")
 
 
 def _example_recommendations(ds, test, policy, level2=None) -> None:
@@ -487,5 +546,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/v2.yaml")
     ap.add_argument("--source", default=None, choices=["nflfastR", "synthetic"])
+    ap.add_argument("--transfer", action="store_true",
+                    help="also run leave-one-team-out / leave-one-season-out (~1 hour)")
     args = ap.parse_args()
-    main(args.config, args.source)
+    main(args.config, args.source, args.transfer)

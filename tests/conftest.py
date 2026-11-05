@@ -134,3 +134,35 @@ def l2_eval(l2):
 def l2_unconf():
     """Level 2 with the read's effect on the outcome switched off."""
     return _fit_level2(conf_strength=0.0)
+
+
+def _fit_invariance(effect_heterogeneity: float) -> dict:
+    """Game-cross-fitted nuisances and the invariance test on the training seasons."""
+    from _config import CFG_INV, INV_SEED, N_INV_PLAYS
+    from src.data.load import generate_synthetic_alignment
+    from src.evaluation.invariance import cluster_ids, environment_ids, invariance_test
+    from src.evaluation.transfer import crossfit_nuisances
+
+    pbp = generate_synthetic_alignment(N_INV_PLAYS, seed=INV_SEED,
+                                       seasons=CFG_INV["data"]["seasons"],
+                                       effect_heterogeneity=effect_heterogeneity)
+    ds = build_dataset(pbp, CFG_INV)
+    train, _ = time_aware_split(ds, CFG_INV["data"]["holdout_season"])
+    nu = crossfit_nuisances(train, CFG_INV)
+    df = train.df
+    table, per_env, needed = invariance_test(
+        nu["q_all"], nu["pi_b"], df["action"].to_numpy(), df["reward"].to_numpy(),
+        environment_ids(df, CFG_INV).to_numpy(), cluster_ids(df), CFG_INV)
+    return dict(train=train, nu=nu, table=table, per_env=per_env, needed=needed)
+
+
+@pytest.fixture(scope="session")
+def inv_null():
+    """Every environment shares the alignment's effect."""
+    return _fit_invariance(0.0)
+
+
+@pytest.fixture(scope="session")
+def inv_varies():
+    """Each environment's alignment effect is shifted by N(0, 0.1) per unit."""
+    return _fit_invariance(0.10)

@@ -13,4 +13,7 @@ lightgbm>=4.0
 dowhy>=0.11
 networkx>=3.0
 matplotlib>=3.7
-# econml (causal-forest CATE) is deferred to V3 — intentionally not pinned here.
+# V3 outcome-model alternatives (src/models/outcome/{cate,neural}.py) — optional:
+# the pooled-GBM pipeline imports neither.
+econml>=0.17
+torch>=2.15

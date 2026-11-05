@@ -458,7 +458,7 @@ def coverage_effect(ydstogo, heavy, family, blitz) -> np.ndarray:
 def generate_synthetic_alignment(
     n_plays: int = 12000, seed: int = 11, seasons: list[int] | None = None,
     n_teams: int = 8, conf_strength: float = CONF_STRENGTH,
-    coverage_effects: bool = False,
+    coverage_effects: bool = False, effect_heterogeneity: float = 0.0,
 ) -> pd.DataFrame:
     """Simulate every-snap play-by-play from a known alignment SCM.
 
@@ -475,6 +475,11 @@ def generate_synthetic_alignment(
     whole frame when it is off — is identical to the level-1 SCM.
     `true_alignment_value` ignores coverage and is exact only when it is off;
     `true_dropback_value` is the level-2 truth.
+
+    `effect_heterogeneity > 0` makes the alignment's effect differ by
+    environment: each defense-season gets its own extra reward per unit of
+    heaviness, drawn N(0, effect_heterogeneity), on every snap. Also its own
+    random stream; at 0 the frame is unchanged.
     """
     rng = np.random.default_rng(seed)
     seasons = list(seasons) if seasons else [2022, 2023, 2024, 2025]
@@ -555,6 +560,12 @@ def generate_synthetic_alignment(
         rushers = np.where(blitz == 1, 5.0, 4.0)
         reward = reward + np.where(is_run, 0.0, coverage_effect(ydstogo, heavy, family, blitz))
         truth = {"_heavy": heavy}
+    if effect_heterogeneity > 0:
+        rng3 = np.random.default_rng(seed + 104729)
+        env_slope = rng3.normal(0, effect_heterogeneity, (n_teams, len(seasons)))
+        slope = env_slope[defteam, np.searchsorted(np.sort(seasons), g_season[game])]
+        reward = reward + slope * (heavy - 2.5)
+        truth["_env_slope"] = slope
 
     return pd.DataFrame({
         "game_id": np.array([f"G{g}" for g in game]),
@@ -623,10 +634,21 @@ def true_alignment_value(df: pd.DataFrame, actions: np.ndarray) -> float:
     mixture over that response, including deterrence. `actions` is one level-1
     action id per row of `df`.
     """
-    heavy = alignment_heaviness(actions)
-    p_run, r_run, r_pass = _alignment_components(heavy, df["_p_run_logit"].to_numpy())
-    branch = p_run * r_run + (1 - p_run) * r_pass
-    return float((branch + df["_qb_term"].to_numpy() + df["_base"].to_numpy()).mean())
+    q = true_alignment_q(df)
+    return float(q[np.arange(len(df)), np.asarray(actions)].mean())
+
+
+def true_alignment_q(df: pd.DataFrame, n_actions: int = 12) -> np.ndarray:
+    """Ground-truth Q(s, a) = E[R | s, do(a)] for every level-1 call, (n, n_actions)."""
+    p_logit = df["_p_run_logit"].to_numpy()
+    rest = df["_qb_term"].to_numpy() + df["_base"].to_numpy()
+    slope = df["_env_slope"].to_numpy() if "_env_slope" in df.columns else 0.0
+    out = np.empty((len(df), n_actions))
+    for a in range(n_actions):
+        heavy = alignment_heaviness(np.full(len(df), a))
+        p_run, r_run, r_pass = _alignment_components(heavy, p_logit)
+        out[:, a] = p_run * r_run + (1 - p_run) * r_pass + slope * (heavy - 2.5) + rest
+    return out
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:

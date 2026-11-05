@@ -116,8 +116,14 @@ def _fit_pipeline(ds: Dataset, cfg: dict, X: pd.DataFrame, y: np.ndarray,
     return pipe, calibrated
 
 
-def fit_behavior_model(ds: Dataset, cfg: dict) -> tuple[BehaviorModel, dict]:
-    """Fit pi_b on `ds` and return the model plus cross-fitted diagnostics."""
+def fit_behavior_model(ds: Dataset, cfg: dict,
+                       diagnose: bool = True) -> tuple[BehaviorModel, dict]:
+    """Fit pi_b on `ds` and return the model plus cross-fitted diagnostics.
+
+    `diagnose=False` skips the diagnostics (and their extra cross-fitted fits)
+    and returns an empty dict — for refits inside a resampling loop, where
+    only the model is used.
+    """
     clip = tuple(cfg["ope"]["clip_propensity"])
     seed = cfg["seed"]
     X = ds.df[ds.state_cols]
@@ -129,7 +135,7 @@ def fit_behavior_model(ds: Dataset, cfg: dict) -> tuple[BehaviorModel, dict]:
         n_actions=ds.n_actions, clip=clip,
     )
 
-    diagnostics = _diagnose(ds, cfg, model, calibrated)
+    diagnostics = _diagnose(ds, cfg, model, calibrated) if diagnose else {}
     return model, diagnostics
 
 

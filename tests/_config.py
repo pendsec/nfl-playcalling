@@ -60,3 +60,13 @@ L1_SEED = 11
 # truth claims are about a gain of ~0.01 per dropback.
 N_L2_PLAYS = 16000
 L2_SEED = 11
+
+# Invariance across environments (defense-seasons): the alignment SCM with and
+# without a per-environment alignment effect. 8 defenses x 3 training seasons =
+# 24 environments of ~500 snaps.
+N_INV_PLAYS = 16000
+INV_SEED = 11
+CFG_INV = {**CFG_L1,
+           "invariance": {"environment": "team_season", "crossfit_folds": 5,
+                          "n_permutations": 300, "min_taken": 30, "alpha": 0.05,
+                          "min_tau": 0.02}}

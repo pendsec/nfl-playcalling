@@ -258,7 +258,19 @@ pandas 3 stack.)
 python run.py                     # real SF nflfastR data (configs/v2.yaml)
 python run.py --source synthetic  # known-SCM data, no network
 pytest tests/                     # synthetic-SCM regression tests
+pytest experiments/               # benchmarked alternatives (needs torch, econml)
 ```
+
+[`experiments/`](experiments/) keeps every alternative that was benchmarked
+against the pipeline's own choices, each with its question, results and verdict,
+so nothing is tried twice. One example is
+[`experiments/outcome_models/`](experiments/outcome_models/), which compares
+causal-contrast learners (DR-learner, causal-forest R-learner) and PyTorch
+TARNet / DragonNet against the pooled gradient-boosted outcome model. The
+factored DragonNet is available as an outcome model (`outcome_model.type:
+dragonnet` in [`configs/v3.yaml`](configs/v3.yaml)); the gradient-boosted model
+stays the default. Its hyperparameters come from a 48-config search in
+[`experiments/dragonnet_tuning/`](experiments/dragonnet_tuning/).
 
 For a narrated, step-by-step walkthrough with plots (action sparsity, the DAG,
 positivity heatmap, calibration curve, DR recovery, and the sensitivity band),
@@ -333,6 +345,32 @@ The two levels are scored together per charted dropback
 coverage pipeline by projecting both into alignment × coverage on that defense's
 held-out dropbacks (`src/evaluation/projection_gate.py`): no regression, on a
 sample too small to show a difference under about ±0.16 per dropback.
+
+Last, whether any of it holds beyond the defenses and seasons it was learned on —
+inside 2022–24, so the held-out season stays untouched
+(`src/evaluation/invariance.py`, `src/evaluation/transfer.py`):
+
+```bash
+python run.py --config configs/v3.yaml --transfer   # adds leave-one-team/season-out (~1 hour)
+```
+
+- **Invariance across the 96 team-seasons.** For each part of the call (package,
+  box) the test asks whether the outcome model's out-of-fold miss on snaps that
+  took it, against the most common one, varies between team-seasons beyond noise.
+  The noise is measured by shuffling whole games between team-seasons, because
+  game-clustered standard errors understate it 1.5–2× at ~17 games each. No part
+  varies, so one pooled outcome model serves every defense and no
+  invariance-penalized model is needed. That includes the eight-man box — the one
+  call with a clear effect (+0.05 reward/snap over a six-man box) is the same
+  effect everywhere.
+- **Transfer.** Each team, then each season, is left out; the whole policy is
+  refit without it and scored on it by models cross-fitted by game. A held-out
+  season: lift +0.001 ± 0.003, the same as the policy that saw it. A held-out team
+  loses 0.013/snap — but only because the policy, deferring to "the coordinator's
+  mix", must guess an unseen team's mix from the league's. The same departures,
+  deferring to the team's own mix, score −0.002 ± 0.002, no team regresses: the
+  calls the policy changes transfer, and the calls it leaves alone need the
+  team's own history.
 
 ### Design decisions, and the failure each one prevents
 

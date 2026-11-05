@@ -95,9 +95,23 @@ def _check_conditions_on_adjustment_set(ds: Dataset, cfg: dict) -> None:
         )
 
 
+def _model_type(cfg: dict) -> str:
+    return cfg["outcome_model"].get("type", "lightgbm")
+
+
 def fit_q_model(ds: Dataset, cfg: dict) -> QModel:
     """Fit the outcome model on all of `ds` — per-action regressors by default,
-    or one pooled regressor when `outcome_model.structure` is `pooled`."""
+    or one pooled regressor when `outcome_model.structure` is `pooled`.
+    `outcome_model.type` tarnet | dragonnet selects a network (`neural.py`)."""
+    kind = _model_type(cfg)
+    if kind != "lightgbm":
+        _check_conditions_on_adjustment_set(ds, cfg)
+        if kind in ("tarnet", "dragonnet"):
+            from .neural import fit_neural_q_model
+            return fit_neural_q_model(ds, cfg)
+        hint = (" — benchmarked and not adopted; it lives in experiments/outcome_models/"
+                if kind in ("dr_learner", "r_learner") else "")
+        raise ValueError(f"unknown outcome_model.type '{kind}'{hint}")
     if _is_pooled(cfg):
         return fit_pooled_q_model(ds, cfg)
     _check_conditions_on_adjustment_set(ds, cfg)
@@ -135,6 +149,8 @@ def crossfit_q(ds: Dataset, cfg: dict) -> np.ndarray:
     score the held-out fold. Returns shape (n, n_actions).
     """
     _check_conditions_on_adjustment_set(ds, cfg)
+    if _model_type(cfg) != "lightgbm":
+        return _crossfit_generic(ds, cfg)
     if _is_pooled(cfg):
         return _crossfit_pooled(ds, cfg)
     prep = build_gbm_preprocessor(ds)
@@ -160,7 +176,7 @@ def crossfit_q(ds: Dataset, cfg: dict) -> np.ndarray:
 
 
 # ── Uncertainty ──────────────────────────────────────────────────────────────
-def fit_q_ensemble(ds: Dataset, cfg: dict):
+def fit_q_ensemble(ds: Dataset, cfg: dict, fit=None):
     """Bootstrap ensemble of the configured Q model, resampling whole games.
 
     Feeds the conservative policy's lower confidence bound. On 2022-25 the
@@ -170,6 +186,9 @@ def fit_q_ensemble(ds: Dataset, cfg: dict):
     the data could not separate from zero. Penalizing a call by how much its
     advantage moves across resamples makes the policy leave the coordinator
     only where the data has established the difference.
+
+    `fit` refits each member (default `fit_q_model`); an experiment can pass
+    its own so a model outside the pipeline gets the same bootstrap.
     """
     from ...schemas.outcome import QEnsemble
 
@@ -192,7 +211,7 @@ def fit_q_ensemble(ds: Dataset, cfg: dict):
                        action_col=ds.action_col, reward_col=ds.reward_col,
                        n_actions=ds.n_actions, action_labels=ds.action_labels)
         bcfg = {**cfg, "seed": int(cfg["seed"]) + 1 + b}
-        members.append(fit_q_model(boot, bcfg))
+        members.append((fit or fit_q_model)(boot, bcfg))
     return QEnsemble(members=members, n_actions=ds.n_actions)
 
 
@@ -235,6 +254,20 @@ def fit_pooled_q_model(ds: Dataset, cfg: dict):
                          n_actions=ds.n_actions, state_cols=ds.state_cols)
     model.q_scale = _within_state_spread(model.predict_all_actions(ds.df))
     return model
+
+
+def _crossfit_generic(ds: Dataset, cfg: dict) -> np.ndarray:
+    """Out-of-fold Q for any model `fit_q_model` builds: refit per fold."""
+    mu = np.empty((len(ds.df), ds.n_actions))
+    kf = KFold(n_splits=cfg["outcome_model"].get("cross_fit_folds", 5),
+               shuffle=True, random_state=cfg["seed"])
+    for tr, va in kf.split(ds.df):
+        fold = Dataset(df=ds.df.iloc[tr].reset_index(drop=True), numeric_state=ds.numeric_state,
+                       categorical_state=ds.categorical_state, action_col=ds.action_col,
+                       reward_col=ds.reward_col, n_actions=ds.n_actions,
+                       action_labels=ds.action_labels)
+        mu[va] = fit_q_model(fold, cfg).predict_all_actions(ds.df.iloc[va])
+    return mu
 
 
 def _crossfit_pooled(ds: Dataset, cfg: dict) -> np.ndarray:
