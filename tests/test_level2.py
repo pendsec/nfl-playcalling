@@ -137,6 +137,28 @@ def test_coordinator_row_is_exactly_zero_lift(l2_eval):
     np.testing.assert_allclose(l2_eval["policies"]["both levels"].sum(1), 1.0)
 
 
+def test_factored_judges_replace_only_the_coordinators_mix(l2):
+    """Judges equal to the policies' own pi_b reproduce the default exactly; a
+    different coverage judge moves the coordinator but not the policies."""
+    df, cfg = l2["test2"].df, l2["cfg"]
+    args = (df, cfg, l2["pol1"], l2["pol2"], l2["beh1_db"], l2["beh2"], l2["q2"])
+    same = evaluate_factored(*args, judges=(l2["beh1_db"], l2["beh2"]))
+    np.testing.assert_allclose(same["pi_b"], l2["eval"]["pi_b"])
+    pd.testing.assert_frame_equal(same["table"], l2["eval"]["table"])
+
+    class Uniform:
+        def propensity(self, d):
+            return np.full((len(d), l2["pol2"].n_actions), 1.0 / l2["pol2"].n_actions)
+
+    other = evaluate_factored(*args, judges=(l2["beh1_db"], Uniform()))
+    k2 = l2["pol2"].n_actions
+    np.testing.assert_allclose(other["pi_b"].reshape(len(df), -1, k2).sum(2),
+                               l2["eval"]["p1_behavior"])
+    np.testing.assert_allclose(other["policies"]["coverage only"],
+                               l2["eval"]["policies"]["coverage only"])
+    assert other["table"].set_index("policy").loc["coordinator", "lift"] == 0.0
+
+
 def test_level2_policy_beats_the_coordinator_in_truth(l2_unconf):
     """Where the effects are not confounded, the coverage policy at the
     coordinator's own alignment is worth more in truth than his coverage."""

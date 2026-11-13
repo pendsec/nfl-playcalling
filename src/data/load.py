@@ -599,6 +599,7 @@ def generate_synthetic_alignment(
         # Ground truth (any "_" column survives build_dataset; never a feature).
         "_coach_read": coach_read,
         "_p_run_logit": p_run_logit,
+        "_heavy_bias": team_heavy_bias[defteam],
         "_qb_term": qb_term,
         "_base": base,
         **truth,
@@ -624,6 +625,26 @@ def true_dropback_value(df: pd.DataFrame, joint_probs: np.ndarray,
              + coverage_effect(ytg, heavy, np.asarray(level2_family)[a2][None, :], (a2 % 2)[None, :]))
     return float(((joint_probs * value).sum(axis=1)
                   + df["_qb_term"].to_numpy() + df["_base"].to_numpy()).mean())
+
+
+def true_alignment_propensity(df: pd.DataFrame, n_nodes: int = 40) -> np.ndarray:
+    """Ground-truth pi_b(a | s) on `generate_synthetic_alignment` data, (n, 12):
+    the coordinator's call probability given the OBSERVED state, i.e. his
+    softmax averaged over the hidden read ~ N(0, 1) (Gauss-Hermite). This is
+    what a behavior model fit on the logged state can at best recover."""
+    x, w = np.polynomial.hermite_e.hermegauss(n_nodes)
+    w = w / w.sum()
+    ideal = 5.0 * _sigmoid(df["_p_run_logit"].to_numpy())
+    bias = df["_heavy_bias"].to_numpy()
+    heavy = alignment_heaviness(np.arange(12))[None, :]
+    base = -0.6 * (heavy - ideal[:, None] - bias[:, None]) ** 2
+    out = np.zeros((len(df), 12))
+    for xi, wi in zip(x, w):
+        z = base + 0.30 * xi * (heavy - 2.5) / 2.5
+        z -= z.max(axis=1, keepdims=True)
+        e = np.exp(z)
+        out += wi * e / e.sum(axis=1, keepdims=True)
+    return out
 
 
 def true_alignment_value(df: pd.DataFrame, actions: np.ndarray) -> float:

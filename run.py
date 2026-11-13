@@ -43,6 +43,10 @@ from src.data.features import (action_scheme, assert_ftn_coverage, build_dataset
                                build_level2_dataset, level2_config,
                                slice_report, time_aware_split)
 from src.models.behavior.propensity import fit_behavior_model
+from src.models.behavior.judge import fit_judge_behavior, judge_mode
+from src.models.calibration import weight_balance
+from src.evaluation.invariance import clustered_mean_se
+from src.ope.doubly_robust import dr_per_play
 from src.models.outcome.q_model import fit_q_model, crossfit_q, fit_q_ensemble
 from src.ope.direct_method import behavior_recovery_check, dm_policy_value
 from src.ope.doubly_robust import dr_policy_value
@@ -227,7 +231,13 @@ def main(config_path: str, source_override: str | None, transfer: bool = False) 
     a_te = test.df[ds.action_col].to_numpy()
     r_te = test.df[ds.reward_col].to_numpy()
     q_te = q.predict_all_actions(test.df)
-    pib_te = beh.propensity(test.df)
+    # The judge's pi_b is not the policy's: the policy is fit on the training
+    # seasons and stays that way, the judge must know how the coordinator mixed
+    # his calls in the season it scores (`src/models/behavior/judge.py`).
+    judge = fit_judge_behavior(train, test, cfg, beh)
+    pib_te = judge.propensity(test.df)
+    judge_row = _report_judge(cfg, a_te, beh.propensity(test.df), pib_te,
+                              ds.action_labels, test.df["game_id"].to_numpy())
 
     v_behavior = dr_policy_value(q_te, pib_te, pib_te, a_te, r_te, weight_clip,
                                  policy_name="behavior", graph_version=gv)
@@ -238,6 +248,19 @@ def main(config_path: str, source_override: str | None, transfer: bool = False) 
     print(f"  V_DR(pi*)  on holdout: {v_policy.value:+.4f}  "
           f"95% CI [{v_policy.ci95[0]:+.4f}, {v_policy.ci95[1]:+.4f}]")
     print(f"  estimated lift       : {v_policy.value - v_behavior.value:+.4f} reward/play")
+    if safe and judge is not beh:
+        # Deferring, the policy plays its own (train-fit) estimate of the mix,
+        # which the judge no longer shares — so the lift above also prices how
+        # stale that estimate is. Anchored: the same departures, deferring to
+        # the judge's mix, as a deployed policy would (it knows this season).
+        anchored = np.where(out["deferred"][:, None], pib_te, out["policy_probs"])
+        base = dr_per_play(q_te, pib_te, pib_te, a_te, r_te, weight_clip)
+        games = test.df["game_id"].to_numpy()
+        for tag, probs in (("as built", out["policy_probs"]), ("anchored", anchored)):
+            d, se = clustered_mean_se(dr_per_play(q_te, pib_te, probs, a_te, r_te,
+                                                  weight_clip) - base, games)
+            judge_row[f"lift_{tag.replace(' ', '_')}"], judge_row[f"lift_{tag.replace(' ', '_')}_se"] = d, se
+            print(f"    lift {tag:<9}: {d:+.4f} ± {1.96 * se:.4f} (paired, games clustered)")
     # Agreement rate alone is a poor read on conservatism: the DC plays a
     # stochastic mix whose modal call covers only ~26% of snaps, so a
     # deterministic argmax cannot agree much beyond that even when it is
@@ -300,7 +323,8 @@ def main(config_path: str, source_override: str | None, transfer: bool = False) 
 
     # ── 7. Policy regression gate ────────────────────────────────────────────
     _rule("[7/10] Regression gate — candidate policy vs baseline on the holdout season")
-    cmp = compare_to_baseline(test, q, beh, cfg, ensemble=ensemble, candidate=policy)
+    cmp = compare_to_baseline(test, q, beh, cfg, ensemble=ensemble, candidate=policy,
+                              judge=judge)
     print(cmp.report())
 
     level2 = None
@@ -312,6 +336,7 @@ def main(config_path: str, source_override: str | None, transfer: bool = False) 
 
     _example_recommendations(ds, test, policy, level2)
     _save_outputs(cfg, ds, q_all_train, v_behavior, v_policy, sens, contrasts, cmp, ladder)
+    pd.DataFrame([judge_row]).to_csv(f"{cfg.get('output_dir', 'outputs')}/judge.csv", index=False)
     if graph_checks is not None:
         graph_checks.to_csv(f"{cfg.get('output_dir', 'outputs')}/graph_checks.csv", index=False)
 
@@ -323,7 +348,8 @@ def main(config_path: str, source_override: str | None, transfer: bool = False) 
 
 def _level2(cfg, pbp, ds1, policy1, weight_clip) -> dict:
     """Stages 8-9: coverage given the alignment, the factored policy, the V2 gate."""
-    from src.policy.hierarchical import evaluate_factored, fit_dropback_alignment_behavior
+    from src.policy.hierarchical import (dropback_alignment_dataset, evaluate_factored,
+                                         fit_dropback_alignment_behavior)
 
     cfg2 = level2_config(cfg)
     graph2 = scm.graph_for(cfg2)
@@ -352,12 +378,12 @@ def _level2(cfg, pbp, ds1, policy1, weight_clip) -> dict:
           f"classwise ECE {diag2['classwise_ece']:.3f}")
     a2 = test2.df["action"].to_numpy()
     r2 = test2.df["reward"].to_numpy()
-    pib2 = beh2.propensity(test2.df)
+    judge2 = fit_judge_behavior(train2, test2, cfg2, beh2)
+    pib2 = judge2.propensity(test2.df)
     # Coverage labels are where the charting drifts, so check the propensities
     # against the season they will weight before trusting them.
-    drift = np.abs(pib2.mean(0) - np.bincount(a2, minlength=ds2.n_actions) / len(a2))
-    print(f"  calibration in the large on the holdout: largest gap "
-          f"{drift.max():.3f} ({ds2.action_labels[int(drift.argmax())]})")
+    _report_judge(cfg2, a2, beh2.propensity(test2.df), pib2, ds2.action_labels,
+                  test2.df["game_id"].to_numpy(), indent="  ")
 
     q2 = fit_q_model(train2, cfg2)
     ens2 = fit_q_ensemble(train2, cfg2)
@@ -384,7 +410,13 @@ def _level2(cfg, pbp, ds1, policy1, weight_clip) -> dict:
     # ── 9. The factored policy, and the V2 -> V3 gate ───────────────────────
     _rule("[9/10] Factored policy (alignment x coverage) + V2 -> V3 projection gate")
     beh1_db, _ = fit_dropback_alignment_behavior(train2, cfg)
-    fac = evaluate_factored(test2.df, cfg, policy1, policy2, beh1_db, beh2, q2, weight_clip)
+    judges = None
+    if judge_mode(cfg) != "train":
+        judge1_db = fit_judge_behavior(dropback_alignment_dataset(train2, cfg),
+                                       dropback_alignment_dataset(test2, cfg), cfg, beh1_db)
+        judges = (judge1_db, judge2)
+    fac = evaluate_factored(test2.df, cfg, policy1, policy2, beh1_db, beh2, q2, weight_clip,
+                            judges=judges)
     print(f"  per charted dropback, play held a dropback (n={len(test2.df):,}); "
           f"level 1 departs on {fac['level1_departs']:.1%}, level 2 on "
           f"{fac['level2_departs']:.1%}")
@@ -517,6 +549,46 @@ def _example_recommendations(ds, test, policy, level2=None) -> None:
             else:
                 print(f"       coverage: {labels2[c]}  (advantage {r2['advantage'][0][c]:+.3f} "
                       f"± {r2['q_sd'][0][c]:.3f})")
+
+
+def _report_judge(cfg, a, p_policy, p_judge, labels, games, indent="  ") -> dict:
+    """How far the policy's train-fit pi_b is from the judge's on the scored
+    season: log loss (paired, games clustered), the worst calibration-in-the-
+    large gap and the worst weight balance (1 = the weights average right) over
+    calls supported on at least 200 snaps."""
+    thr = cfg["policy"].get("support_threshold", 0.05)
+    k = p_policy.shape[1]
+    share = np.bincount(a, minlength=k) / len(a)
+    rows = np.arange(len(a))
+    row = {"judge": judge_mode(cfg), "n": len(a)}
+    for tag, p in (("train_fit", p_policy), ("judge", p_judge)):
+        ll = -np.log(np.clip(p[rows, a], 1e-12, 1.0))
+        citl = np.abs(p.mean(0) - share)
+        # Worst over calls supported on enough snaps to measure: a call almost
+        # never supported (dime/8+) reads 0 under any pi_b and says nothing.
+        wb = np.where((p >= thr).sum(0) >= 200, weight_balance(a, p, thr), np.nan)
+        worst = int(np.nanargmax(np.abs(wb - 1)))
+        row.update({f"{tag}_log_loss": float(ll.mean()), f"{tag}_citl_max": float(citl.max()),
+                    f"{tag}_citl_call": labels[int(citl.argmax())],
+                    f"{tag}_balance_worst": float(wb[worst]),
+                    f"{tag}_balance_call": labels[worst]})
+        row[f"_{tag}_rows"] = ll
+    if row["judge"] == "train":
+        print(f"{indent}judge's pi_b: the policy's own (train-fit) — holdout log loss "
+              f"{row['train_fit_log_loss']:.3f}; largest calibration-in-the-large gap "
+              f"{row['train_fit_citl_max']:.3f} ({row['train_fit_citl_call']})")
+    else:
+        d, se = clustered_mean_se(row["_judge_rows"] - row["_train_fit_rows"], games)
+        row["log_loss_diff"], row["log_loss_diff_se"] = d, se
+        print(f"{indent}judge's pi_b: training seasons + the holdout's other games, season in "
+              f"the state, {cfg['ope'].get('judge_folds', 5)} folds by game (calls, never rewards)")
+        for tag, name in (("train_fit", "train-fit (the policy's)"), ("judge", "judge")):
+            print(f"{indent}  {name:<25} log loss {row[f'{tag}_log_loss']:.4f} · largest "
+                  f"share gap {row[f'{tag}_citl_max']:.3f} ({row[f'{tag}_citl_call']}) · worst "
+                  f"weight balance {row[f'{tag}_balance_worst']:.2f} ({row[f'{tag}_balance_call']})")
+        print(f"{indent}  log loss, judge - train-fit: {d:+.4f} ± {1.96 * se:.4f}")
+    del row["_train_fit_rows"], row["_judge_rows"]
+    return row
 
 
 def _save_outputs(cfg, ds, q_all_train, v_behavior, v_policy, sens, contrasts,

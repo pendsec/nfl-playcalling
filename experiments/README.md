@@ -23,6 +23,7 @@ not stays here or is described below.
 | Experiment | Question | Verdict |
 |---|---|---|
 | [`outcome_models/`](outcome_models/) | Do causal-contrast learners (econml DR-learner, causal-forest R-learner) or PyTorch TARNet / DragonNet estimate the call advantages better than the pooled GBM? | **Pooled GBM stays.** Factored DragonNet ties it on real 2025 DR loss and is the Phase 4 neural candidate, but needs its own uncertainty before it can be gated. Separate per-call heads and the contrast learners lose. |
+| [`behavior_calibration/`](behavior_calibration/) | Does a joint multiclass calibrator (temperature, vector, Dirichlet) or a factored π_b give better propensities than one-vs-rest isotonic? | **Isotonic stays; Dirichlet not adopted for π_b** (−0.027 log loss on synthetic, none on real). Calibration folds by game beat folds by snap (−0.016 / −0.006). The real miss is the call mix drifting between seasons: a judge π_b cross-fitted on the scored season, pooled with the training seasons, cuts 2025 log loss by 0.108 and fixes the weight balance (nickel/8+ 0.33 → 0.92). **Adopted**: game folds are the π_b default and the pooled judge is the pipeline's (`ope.judge_propensity`). |
 | [`dragonnet_tuning/`](dragonnet_tuning/) | Does tuning the factored DragonNet (48-config random search, 2022–23 → 2024, refined on fresh seeds) make it beat the GBM? | **Defaults stay.** The winner's 2024 gain vanished on 2025 (−0.00015 ± 0.00037 vs default) and it was worse on the synthetic truth (0.0259 vs 0.0214). One season's DR loss rewards flat advantages when the call effects are this small. The default ranks 3rd of 48 by true error. |
 
 ## Earlier trials (no saved code)
@@ -45,4 +46,4 @@ reproduced through the config switch named.
 | Offense quality half-life: 1 game, 250 plays, unweighted | Next-game EPA correlation 0.262 / 0.319 / 0.284. | 250 plays | `features.offense_quality_halflife_plays` |
 | Invariance statistic: per-team-season DR contrasts, chi² | DR SEs about 2× too small; clustered SEs still 1.5–2× too small. | residual contrasts + game-permutation null | `src/evaluation/invariance.py` |
 | Leave-one-team-out: defer to the fold's π_b vs the team's own mix | −0.013 ± 0.003 vs −0.002 ± 0.002: the loss is the unknown mix, not the departures. | both reported | `lift_anchored` in `transfer.csv` |
-| Shell imputer calibration: cross-fitted temperature scaling | Confidence ECE 0.032 → 0.020; classwise ECE barely moves. | open (Dirichlet / vector scaling next) | `src/models/imputation/` |
+| Shell imputer calibration: cross-fitted temperature scaling | Confidence ECE 0.032 → 0.020; classwise ECE barely moves. | open (Dirichlet / vector scaling now in `src/models/calibration.py`, not yet applied to the imputer) | `src/models/imputation/` |

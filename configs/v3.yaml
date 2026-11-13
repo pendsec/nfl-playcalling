@@ -72,6 +72,13 @@ behavior_model:
   min_child_samples: 30
   subsample: 0.8
   colsample_bytree: 0.8
+  # isotonic (one-vs-rest) | none | temperature | vector | dirichlet. Joint
+  # multiclass calibrators were tried (experiments/behavior_calibration/): no
+  # gain on real data, where the miss is the call mix drifting between seasons.
+  calibration: isotonic
+  # Calibration folds hold out whole games: snap folds leave a snap's game-mates
+  # in training, and the calibrator learns from optimistic predictions.
+  calibration_groups: game    # play | game (game: -0.016 log loss on 2024, -0.006 on 2025)
   calibration_folds: 3
   cross_fit_folds: 3
 
@@ -145,6 +152,12 @@ policy:
 ope:
   clip_propensity: [0.01, 0.99]
   weight_clip: 20.0
+  # The judge's pi_b (the holdout's DR/IPW weights), not the policy's:
+  # pooled_crossfit = training seasons + the scored season's other games, season
+  # in the state, folds by game — learns the scored season's call mix (calls,
+  # never rewards). train = the policy's own train-fit pi_b. src/models/behavior/judge.py
+  judge_propensity: pooled_crossfit
+  judge_folds: 5
   aipw_baseline: nickel_box6  # the modal alignment (~39% of snaps); modal call if absent
 
 sensitivity:

@@ -114,3 +114,74 @@ def test_reliability_table_bins_are_well_formed():
     assert not t.empty and t["n"].sum() == len(y)
     assert (t["bin_lo"] < t["bin_hi"]).all()
     assert np.allclose(t["gap"], t["accuracy"] - t["mean_confidence"])
+
+
+# ── Joint multiclass calibration (vector / Dirichlet) ────────────────────────
+from src.models.calibration import (MatrixScaler, calibration_in_the_large,
+                                    weight_balance)
+
+
+def _miscalibrated(n=40000, k=6, seed=0):
+    """True probabilities, draws, and a per-class temperature + shift of them —
+    the miscalibration one global temperature cannot undo."""
+    rng = np.random.default_rng(seed)
+    logit = rng.normal(0, 1, (n, k)) * np.linspace(0.5, 2, k)
+    p = np.exp(logit)
+    p /= p.sum(1, keepdims=True)
+    y = (rng.random(n)[:, None] > np.cumsum(p, 1)).sum(1).clip(0, k - 1)
+    bad = np.exp(np.log(p) * np.linspace(2, 0.6, k) + np.linspace(-0.5, 0.5, k))
+    return p, y, bad / bad.sum(1, keepdims=True)
+
+
+@pytest.mark.parametrize("kind", ["vector", "dirichlet"])
+def test_matrix_scalers_undo_a_per_class_miscalibration(kind):
+    p, y, bad = _miscalibrated()
+    h = len(y) // 2
+    fitted = MatrixScaler.fit_cv(bad[:h], y[:h], kind)
+    out = fitted.transform(bad[h:])
+    kl = lambda q: float((p[h:] * np.log(p[h:] / q)).sum(1).mean())
+    assert kl(out) < 0.01 < kl(TemperatureScaler.fit(bad[:h], y[:h]).transform(bad[h:]))
+    assert classwise_ece(y[h:], out) < classwise_ece(y[h:], bad[h:]) / 5
+    np.testing.assert_allclose(out.sum(1), 1.0)
+
+
+def test_matrix_scaler_identity_is_a_no_op_and_vector_is_diagonal():
+    p, y, _ = _miscalibrated(n=2000)
+    k = p.shape[1]
+    np.testing.assert_allclose(MatrixScaler(np.eye(k), np.zeros(k)).transform(p), p, atol=1e-10)
+    v = MatrixScaler.fit(p, y, "vector", 1e-3)
+    assert np.allclose(v.W, np.diag(np.diag(v.W)))
+    with pytest.raises(ValueError, match="matrix scaler"):
+        MatrixScaler.fit(p, y, "matrix")
+
+
+def test_heavy_odir_regularization_keeps_the_diagonal():
+    """ODIR shrinks the off-diagonal weights and intercepts, not the diagonal:
+    at a huge lambda Dirichlet falls back toward per-class temperatures, never
+    toward the base rate."""
+    _, y, bad = _miscalibrated(n=5000)
+    m = MatrixScaler.fit(bad, y, "dirichlet", lam=1e4)
+    off = m.W - np.diag(np.diag(m.W))
+    assert np.abs(off).max() < 1e-2 and np.abs(m.b).max() < 1e-2
+    assert np.diag(m.W).min() > 0.3
+
+
+def test_the_gradient_matches_finite_differences():
+    """L-BFGS gets the analytic gradient; check it on a tiny problem through
+    the fit's own convergence: the optimum of a convex objective is unique."""
+    _, y, bad = _miscalibrated(n=3000, k=4)
+    a = MatrixScaler.fit(bad, y, "dirichlet", lam=1e-2)
+    b = MatrixScaler.fit(bad[::-1], y[::-1], "dirichlet", lam=1e-2)   # same data, reordered
+    np.testing.assert_allclose(a.W, b.W, atol=1e-3)
+
+
+def test_balance_and_citl_are_exact_for_the_true_propensity():
+    p, y, bad = _miscalibrated(n=200000)
+    assert np.abs(calibration_in_the_large(y, p)).max() < 0.005
+    wb = weight_balance(y, p, floor=0.05)
+    assert np.nanmax(np.abs(wb - 1)) < 0.03
+    assert np.nanmax(np.abs(weight_balance(y, bad, floor=0.05) - 1)) > 0.1
+    # A class never supported reports NaN rather than 0.
+    q = p.copy()
+    q[:, 0] = 0.0
+    assert np.isnan(weight_balance(y, q, floor=0.05)[0])

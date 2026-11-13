@@ -1,5 +1,5 @@
 """
-Probability calibration — metrics and temperature scaling.
+Probability calibration — metrics, temperature, vector and Dirichlet scaling.
 
 Shared by the behavior model (pi_b) and the shell imputer, because both produce
 multiclass probabilities that are consumed AS probabilities rather than as
@@ -141,6 +141,142 @@ class TemperatureScaler:
 
         best = minimize_scalar(nll, bounds=bounds, method="bounded")
         return cls(temperature=float(best.x))
+
+
+@dataclass
+class MatrixScaler:
+    """Joint multiclass recalibration on the log-probabilities:
+
+        p' = softmax(W log p + b)
+
+    `kind` fixes W's shape:
+      * vector    — diagonal W (2K parameters): a temperature per class, plus a
+                    per-class shift that repairs calibration in the large.
+      * dirichlet — full W (K^2 + K; Kull et al. 2019). Lets one class's score
+                    move another's probability, which a one-vs-rest method
+                    (isotonic, per-class Platt) never sees: those calibrate each
+                    column alone and renormalize, so the row they return is no
+                    one's calibrated distribution. Regularized ODIR-style —
+                    off-diagonal weights and intercepts are shrunk, the diagonal
+                    is not — so with heavy regularization it falls back to
+                    per-class temperatures rather than to the base rate.
+
+    The identity (W = I, b = 0) leaves the input unchanged. Fit on predictions
+    from data the base model did not train on (out-of-fold), never in-sample.
+    """
+    W: np.ndarray
+    b: np.ndarray
+    kind: str = "dirichlet"
+    lam: float = 0.0
+
+    def transform(self, proba: np.ndarray) -> np.ndarray:
+        z = _logp(proba) @ self.W.T + self.b
+        return _softmax(z)
+
+    @classmethod
+    def fit(cls, proba: np.ndarray, y: np.ndarray, kind: str = "dirichlet",
+            lam: float = 1e-3) -> "MatrixScaler":
+        """Minimize log loss + lam * ODIR penalty by L-BFGS from the identity."""
+        from scipy.optimize import minimize
+
+        if kind not in ("vector", "dirichlet"):
+            raise ValueError(f"unknown matrix scaler '{kind}' (vector | dirichlet)")
+        L, y = _logp(proba), np.asarray(y)
+        n, k = L.shape
+        Y = np.zeros((n, k))
+        Y[np.arange(n), y] = 1.0
+        off = 1.0 - np.eye(k)
+        n_off = max(k * (k - 1), 1)
+
+        def unpack(theta):
+            if kind == "vector":
+                return np.diag(theta[:k]), theta[k:]
+            return theta[:k * k].reshape(k, k), theta[k * k:]
+
+        def objective(theta):
+            W, b = unpack(theta)
+            z = L @ W.T + b
+            z -= z.max(axis=1, keepdims=True)
+            lse = np.log(np.exp(z).sum(axis=1))
+            P = np.exp(z - lse[:, None])
+            loss = float(-(z[np.arange(n), y] - lse).mean())
+            G = (P - Y) / n
+            gW, gb = G.T @ L, G.sum(axis=0)
+            # ODIR: off-diagonal W and the intercepts; the vector scaler's b
+            # gets the same small shrinkage (it is identified only up to a shift).
+            loss += lam * (float(((W * off) ** 2).sum()) / n_off + float(b @ b) / k)
+            gW = gW + 2 * lam * W * off / n_off
+            gb = gb + 2 * lam * b / k
+            grad = np.concatenate([np.diag(gW), gb] if kind == "vector" else [gW.ravel(), gb])
+            return loss, grad
+
+        theta0 = (np.concatenate([np.ones(k), np.zeros(k)]) if kind == "vector"
+                  else np.concatenate([np.eye(k).ravel(), np.zeros(k)]))
+        res = minimize(objective, theta0, jac=True, method="L-BFGS-B",
+                       options={"maxiter": 2000})
+        W, b = unpack(res.x)
+        return cls(W=W, b=b, kind=kind, lam=float(lam))
+
+    @classmethod
+    def fit_cv(cls, proba: np.ndarray, y: np.ndarray, kind: str = "dirichlet",
+               lams: tuple[float, ...] = (1e-4, 1e-3, 1e-2, 1e-1, 1.0),
+               n_folds: int = 3, groups: np.ndarray | None = None,
+               seed: int = 0) -> "MatrixScaler":
+        """Choose lam by held-out log loss over `n_folds` (by `groups` when
+        given), then refit on everything with it."""
+        from sklearn.model_selection import GroupKFold, KFold
+
+        y = np.asarray(y)
+        if len(lams) == 1:
+            return cls.fit(proba, y, kind, lams[0])
+        splitter = (GroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+                    if groups is not None else KFold(n_folds, shuffle=True, random_state=seed))
+        folds = list(splitter.split(proba, y, groups))
+        scores = []
+        for lam in lams:
+            nll = 0.0
+            for tr, te in folds:
+                m = cls.fit(proba[tr], y[tr], kind, lam)
+                p = np.clip(m.transform(proba[te]), 1e-12, 1.0)
+                nll -= np.log(p[np.arange(len(te)), y[te]]).sum()
+            scores.append(nll / len(y))
+        return cls.fit(proba, y, kind, lams[int(np.argmin(scores))])
+
+
+def _logp(proba: np.ndarray) -> np.ndarray:
+    return np.log(np.clip(np.asarray(proba, dtype=float), 1e-12, 1.0))
+
+
+def _softmax(z: np.ndarray) -> np.ndarray:
+    z = z - z.max(axis=1, keepdims=True)
+    e = np.exp(z)
+    return e / e.sum(axis=1, keepdims=True)
+
+
+def calibration_in_the_large(y: np.ndarray, proba: np.ndarray) -> np.ndarray:
+    """Per class: mean predicted probability minus observed share."""
+    y = np.asarray(y)
+    return proba.mean(axis=0) - np.bincount(y, minlength=proba.shape[1]) / len(y)
+
+
+def weight_balance(y: np.ndarray, proba: np.ndarray, floor: float = 0.05) -> np.ndarray:
+    """Per class a, over the snaps where p(a | s) >= `floor`:
+
+        sum 1{A = a} / p(a | s)  /  number of such snaps
+
+    which is 1 in expectation for the true propensity — the property inverse
+    weighting relies on, class by class. Restricted to the supported calls
+    (the only ones the policy weights, at weights <= 1 / floor): unrestricted,
+    a handful of near-zero true propensities make the mean useless as a check.
+    NaN for a class never supported."""
+    y = np.asarray(y)
+    n, k = proba.shape
+    sup = proba >= floor
+    hit = np.zeros((n, k), bool)
+    hit[np.arange(n), y] = True
+    num = np.where(hit & sup, 1.0 / np.maximum(proba, floor), 0.0).sum(axis=0)
+    den = sup.sum(axis=0)
+    return np.where(den > 0, num / np.maximum(den, 1), np.nan)
 
 
 def calibration_report(y: np.ndarray, proba: np.ndarray, n_bins: int = 15) -> dict:

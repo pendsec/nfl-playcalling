@@ -55,19 +55,21 @@ def alignment_frames(df: pd.DataFrame, cfg: dict) -> list[pd.DataFrame]:
     return frames
 
 
-def fit_dropback_alignment_behavior(ds2: Dataset, cfg: dict) -> tuple[BehaviorModel, dict]:
-    """P(a1 | s, dropback): the coordinator's alignment on charted dropbacks.
-
-    Fit on the level-2 training rows with the level-1 state (not the alignment
-    columns — they ARE this model's label). `cfg` is the level-1 configuration.
-    """
+def dropback_alignment_dataset(ds2: Dataset, cfg: dict) -> Dataset:
+    """Level-2 rows relabeled with their level-1 call, over the level-1 state
+    (not the alignment columns — they ARE the label). `cfg` is level 1's."""
     numeric, categorical = state_columns(cfg)
     labels = level1_labels(cfg)
-    ds = Dataset(df=ds2.df.assign(action=ds2.df["l1_action"].to_numpy()),
-                 numeric_state=numeric, categorical_state=categorical,
-                 action_col="action", reward_col=ds2.reward_col,
-                 n_actions=len(labels), action_labels=labels)
-    return fit_behavior_model(ds, cfg)
+    return Dataset(df=ds2.df.assign(action=ds2.df["l1_action"].to_numpy()),
+                   numeric_state=numeric, categorical_state=categorical,
+                   action_col="action", reward_col=ds2.reward_col,
+                   n_actions=len(labels), action_labels=labels)
+
+
+def fit_dropback_alignment_behavior(ds2: Dataset, cfg: dict) -> tuple[BehaviorModel, dict]:
+    """P(a1 | s, dropback): the coordinator's alignment on charted dropbacks,
+    fit on the level-2 training rows. `cfg` is the level-1 configuration."""
+    return fit_behavior_model(dropback_alignment_dataset(ds2, cfg), cfg)
 
 
 def factor(p1: np.ndarray, p2: np.ndarray) -> np.ndarray:
@@ -102,7 +104,8 @@ def level2_under_each_alignment(policy2, beh2: BehaviorModel, q2, df: pd.DataFra
 
 
 def evaluate_factored(df: pd.DataFrame, cfg: dict, policy1, policy2, beh1_db: BehaviorModel,
-                      beh2: BehaviorModel, q2, weight_clip: float = 20.0) -> dict:
+                      beh2: BehaviorModel, q2, weight_clip: float = 20.0,
+                      judges: tuple | None = None) -> dict:
     """Paired DR of the four factorings against the coordinator, on dropbacks.
 
     coordinator     — his alignment, his coverage (the logging policy itself)
@@ -112,11 +115,22 @@ def evaluate_factored(df: pd.DataFrame, cfg: dict, policy1, policy2, beh1_db: Be
 
     Returns the table plus the joint arrays, so callers (the V2 -> V3 gate) can
     score other joint policies against the same nuisances.
+
+    `judges` = (alignment judge, coverage judge) from
+    `src.models.behavior.judge.fit_judge_behavior`: the coordinator's mix, and
+    the DR weights, come from them instead of the policies' train-fit pi_b. The
+    policies still defer to their own pi_b — they never see the scored season.
     """
     k2 = policy2.n_actions
     lvl1 = level1_on_dropbacks(policy1, beh1_db, df)
     lvl2 = level2_under_each_alignment(policy2, beh2, q2, df, cfg)
-    p1_b = beh1_db.propensity(df)
+    if judges is not None:
+        judge1, judge2 = judges
+        p1_b = judge1.propensity(df)
+        lvl2["behavior"] = np.stack([judge2.propensity(f) for f in alignment_frames(df, cfg)],
+                                    axis=1)
+    else:
+        p1_b = beh1_db.propensity(df)
     q_joint = lvl2["q"].reshape(len(df), -1)
     pi_b = factor(p1_b, lvl2["behavior"])
     actions = df["l1_action"].to_numpy() * k2 + df["action"].to_numpy()

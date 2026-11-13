@@ -96,3 +96,79 @@ def test_thin_q_cells_shrink_toward_the_global_mean():
     assert one_play == pytest.approx(-5.0 / 21.0)      # a lone play barely moves it
     assert abs(one_play) < abs(near_full) < 5.0        # graceful with cell size
     assert near_full > -5.0                            # never the raw cell mean
+
+
+# ── Calibration switch (`behavior_model.calibration`) ────────────────────────
+import copy
+
+from _config import CFG_L1
+from src.data.features import build_dataset, time_aware_split
+from src.data.load import (alignment_heaviness, generate_synthetic_alignment,
+                           true_alignment_propensity)
+from src.models.behavior.propensity import CALIBRATIONS, fit_behavior_model
+
+
+@pytest.fixture(scope="module")
+def l1_league():
+    pbp = generate_synthetic_alignment(9000, seed=3, conf_strength=0.0,
+                                       seasons=CFG_L1["data"]["seasons"])
+    return time_aware_split(build_dataset(pbp, CFG_L1), CFG_L1["data"]["holdout_season"])
+
+
+def _bcfg(**kw):
+    c = copy.deepcopy(CFG_L1)
+    c["behavior_model"].update(kw, n_estimators=60)
+    return c
+
+
+@pytest.mark.parametrize("method", CALIBRATIONS)
+def test_every_calibration_gives_full_width_propensities(l1_league, method):
+    train, test = l1_league
+    beh = fit_behavior_model(train, _bcfg(calibration=method), diagnose=False)[0]
+    p = beh.propensity(test.df)
+    assert p.shape == (len(test.df), 12)
+    np.testing.assert_allclose(p.sum(1), 1.0)
+    assert p.min() >= CFG_L1["ope"]["clip_propensity"][0] / 1.5
+
+
+def test_dirichlet_is_closer_to_the_true_propensity_than_raw(l1_league):
+    train, test = l1_league
+    truth = true_alignment_propensity(test.df)
+    kl = lambda p: float((truth * np.log(np.clip(truth, 1e-12, 1) / p)).sum(1).mean())
+    raw = fit_behavior_model(train, _bcfg(calibration="none"), diagnose=False)[0]
+    dirichlet = fit_behavior_model(train, _bcfg(calibration="dirichlet",
+                                                calibration_groups="game"), diagnose=False)[0]
+    assert kl(dirichlet.propensity(test.df)) < kl(raw.propensity(test.df))
+
+
+def test_unknown_calibration_settings_are_rejected(l1_league):
+    train, _ = l1_league
+    with pytest.raises(ValueError, match="behavior_model.calibration"):
+        fit_behavior_model(train, _bcfg(calibration="platt"), diagnose=False)
+    with pytest.raises(ValueError, match="calibration_groups"):
+        fit_behavior_model(train, _bcfg(calibration_groups="week"), diagnose=False)
+
+
+def test_game_grouped_splits_keep_games_whole():
+    rng = np.random.default_rng(0)
+    games = np.repeat(np.arange(60), 50)
+    y = rng.integers(0, 4, len(games))
+    y[:2] = 9                                            # an un-splittable class
+    splits, rare = _cv_splits(y, 3, seed=0, groups=games)
+    assert rare[:2].all() and len(splits) == 3
+    for tr, te in splits:
+        assert not set(games[te]) & set(games[np.setdiff1d(tr, np.flatnonzero(rare))])
+        assert set(np.flatnonzero(rare)) <= set(tr)
+
+
+def test_true_propensity_matches_the_logged_calls(l1_league):
+    """The synthetic truth helper: calibrated in the large on the logged calls,
+    and heavier looks where the offense is likelier to run."""
+    train, _ = l1_league
+    df = train.df
+    p = true_alignment_propensity(df)
+    np.testing.assert_allclose(p.sum(1), 1.0)
+    share = np.bincount(df["action"], minlength=12) / len(df)
+    assert np.abs(p.mean(0) - share).max() < 0.02
+    heavy = (p * alignment_heaviness(np.arange(12))).sum(1)
+    assert np.corrcoef(heavy, df["_p_run_logit"])[0, 1] > 0.5

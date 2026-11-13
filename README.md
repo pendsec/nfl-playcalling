@@ -313,9 +313,10 @@ off.
 
 Headline so far: the recommended alignment policy is **statistically
 indistinguishable from what coordinators actually call** on the held-out season
-(it departs on about one snap in sixteen; DR lift −0.003 ± 0.010 reward/snap), and the
-ladder of estimators — DM, IPW, SNIPW, DR — agrees, so that is a real null rather
-than a broken estimator. The departures are almost all toward a heavier box, whose
+(it departs on about one snap in fifteen; DR lift −0.008 ± 0.011 reward/snap, or
+−0.004 ± 0.010 when its deferrals follow the coordinators' actual mix that season
+rather than its estimate from past seasons), and the ladder of estimators — DM,
+IPW, SNIPW, DR — agrees, so that is a real null rather than a broken estimator. The departures are almost all toward a heavier box, whose
 edge is stable under resampling but partly reflects the coordinator's read of a
 coming run. The allowance charges for the part of that read the data shows (the
 run/pass channel); the causal graph names the rest — the offense's unrecorded
@@ -333,8 +334,8 @@ share rose at 30 of 32 defenses from 2022 to 2024 and fell at all 32 in 2025,
 while the safety structure barely moves. The coverage is valued on charted
 dropbacks, where it is observed, with the alignment in the state
 (`scm.graph.coverage_graph`), and it too keeps the coordinators' mix unless the
-same 99% bound clears: it departs on about 2% of dropbacks, DR lift −0.004 ±
-0.007. That bound is fixed rather than tuned, because tuning it on DR fails here:
+same 99% bound clears: it departs on about 2% of dropbacks, DR lift −0.007 ±
+0.008. That bound is fixed rather than tuned, because tuning it on DR fails here:
 DR rose to several times what the outcome model claimed — what the coordinator's
 read would produce by both choosing the coverage and improving the result, and
 what a simulated league with that read reproduces (DR +0.11 where the truth is
@@ -382,6 +383,21 @@ python run.py --config configs/v3.yaml --transfer   # adds leave-one-team/season
   candidate policy before it is believed.
 - **Calibrated propensities.** Isotonic calibration with calibration error
   tracked, since miscalibrated propensities silently break inverse-weighting.
+  The calibration folds hold out whole games (`behavior_model.calibration_groups:
+  game`): folds by snap leave a snap's game-mates in training, and the calibrator
+  learns from optimistic predictions.
+- **The judge's propensities are learned where it judges.** The policy's πb is
+  fit on the training seasons and stays that way. The πb that weights a held-out
+  season answers a different question — how did coordinators mix their calls *in
+  that season*? — and the mix drifts: nickel with eight in the box went 2.1% →
+  4.2% → 1.5% → 1.0% of snaps across 2022–25, so a model of past seasons weights
+  2025's nickel/8+ snaps at about a third of what they should be, however it is
+  calibrated. The judge (`ope.judge_propensity: pooled_crossfit`,
+  `src/models/behavior/judge.py`) is fit on the training seasons plus the held-out
+  season's other games, with the season in the state, so each held-out game is
+  weighted by a model that never saw it and that uses the season's calls but
+  never its outcomes. Vector and Dirichlet calibration were tried first and do
+  not fix this (`experiments/behavior_calibration/`).
 
   Calibration metrics live in `src/models/calibration.py` and are reported as a
   triple: **confidence ECE** (is the top-class confidence right?), **classwise

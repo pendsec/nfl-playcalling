@@ -21,6 +21,19 @@ Un-splittable classes are held on the *training* side of every fold — they sti
 inform each fit, they simply never receive an out-of-fold prediction — so the
 other eleven actions get honest cross-fitted diagnostics. The excluded row count
 is reported rather than absorbed.
+
+Calibration (`behavior_model.calibration`)
+------------------------------------------
+  * isotonic (default) — sklearn's one-vs-rest isotonic: each call's column is
+    calibrated alone, then the row is renormalized.
+  * temperature | vector | dirichlet — a joint multiclass map on the base
+    model's log-probabilities (`src.models.calibration`), fit on its
+    out-of-fold predictions and applied to the model refit on every row.
+  * none — the raw LightGBM probabilities.
+`behavior_model.calibration_groups: game` keeps whole games together in the
+calibration folds (default `play`, stratified over snaps), so the calibrator
+learns how the model does on games it has not seen — what a held-out season is.
+See experiments/behavior_calibration/ for how they compare.
 """
 
 from __future__ import annotations
@@ -28,18 +41,19 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMClassifier
-from sklearn.base import ClassifierMixin
+from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import accuracy_score, log_loss
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
 
-from ..calibration import calibration_report
+from ..calibration import MatrixScaler, TemperatureScaler, calibration_report
 from ..preprocess import build_gbm_preprocessor
 from ...schemas.dataset import Dataset
 from ...schemas.behavior import BehaviorModel, clip_normalize
 
 Split = tuple[np.ndarray, np.ndarray]
+CALIBRATIONS = ("isotonic", "none", "temperature", "vector", "dirichlet")
 
 
 def _base_classifier(cfg: dict) -> LGBMClassifier:
@@ -56,8 +70,10 @@ def _base_classifier(cfg: dict) -> LGBMClassifier:
     )
 
 
-def _cv_splits(y: np.ndarray, requested: int, seed: int) -> tuple[list[Split], np.ndarray]:
+def _cv_splits(y: np.ndarray, requested: int, seed: int,
+               groups: np.ndarray | None = None) -> tuple[list[Split], np.ndarray]:
     """Stratified folds that keep un-splittable classes on the training side.
+    With `groups`, each group (a game) falls in one fold.
 
     Returns `(splits, rare_mask)`. Classes with fewer members than the fold count
     cannot be stratified, so their rows are appended to every training fold and
@@ -84,16 +100,63 @@ def _cv_splits(y: np.ndarray, requested: int, seed: int) -> tuple[list[Split], n
         return [], rare
 
     # Create splits on dense calls and return splits along with entire set of rare calls
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    if groups is None:
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        folds = skf.split(dense_idx, y[dense_idx])
+    else:
+        skf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        folds = skf.split(dense_idx, y[dense_idx], np.asarray(groups)[dense_idx])
     splits = [
         (np.concatenate([dense_idx[tr], rare_idx]), dense_idx[te])
-        for tr, te in skf.split(dense_idx, y[dense_idx])
+        for tr, te in folds
     ]
     return splits, rare
 
 
-def _make_classifier(cfg: dict, y: np.ndarray, seed: int) -> tuple[ClassifierMixin, bool]:
-    """Isotonic-calibrated LGBM when the classes admit a split; else raw LGBM.
+class CrossFitCalibratedClassifier(BaseEstimator, ClassifierMixin):
+    """A base classifier refit on every row, recalibrated by a joint multiclass
+    map fit on its out-of-fold predictions over `cv` (row positions).
+
+    Rows outside every test fold (un-splittable classes, see `_cv_splits`) get
+    no out-of-fold prediction and do not enter the calibrator's fit.
+    """
+
+    def __init__(self, estimator, method: str = "dirichlet", cv=None,
+                 lambdas: tuple[float, ...] = (1e-4, 1e-3, 1e-2, 1e-1, 1.0), seed: int = 0):
+        self.estimator, self.method, self.cv = estimator, method, cv
+        self.lambdas, self.seed = lambdas, seed
+
+    def _full(self, model, X) -> np.ndarray:
+        out = np.zeros((X.shape[0], len(self.classes_)))
+        out[:, np.searchsorted(self.classes_, model.classes_)] = model.predict_proba(X)
+        return out
+
+    def fit(self, X, y):
+        from sklearn.utils import _safe_indexing
+        y = np.asarray(y)
+        self.classes_ = np.unique(y)
+        oof = np.full((len(y), len(self.classes_)), np.nan)
+        for tr, te in self.cv:
+            m = clone(self.estimator).fit(_safe_indexing(X, tr), y[tr])
+            oof[te] = self._full(m, _safe_indexing(X, te))
+        covered = ~np.isnan(oof).any(axis=1)
+        yi = np.searchsorted(self.classes_, y[covered])
+        if self.method == "temperature":
+            self.calibrator_ = TemperatureScaler.fit(oof[covered], yi)
+        else:
+            self.calibrator_ = MatrixScaler.fit_cv(oof[covered], yi, self.method,
+                                                   tuple(self.lambdas), seed=self.seed)
+        self.estimator_ = clone(self.estimator).fit(X, y)
+        return self
+
+    def predict_proba(self, X) -> np.ndarray:
+        return self.calibrator_.transform(self._full(self.estimator_, X))
+
+
+def _make_classifier(cfg: dict, y: np.ndarray, seed: int,
+                     groups: np.ndarray | None = None) -> tuple[ClassifierMixin, bool]:
+    """The configured calibration around LGBM when the classes admit a split;
+    else raw LGBM.
 
     Calibration folds come from `_cv_splits`, so an un-splittable class no longer
     disables calibration for every other action. Such a class simply has no
@@ -101,16 +164,30 @@ def _make_classifier(cfg: dict, y: np.ndarray, seed: int) -> tuple[ClassifierMix
     exactly the right answer for a call with a single logged play, and one the
     propensity clip then floors.
     """
+    bcfg = cfg["behavior_model"]
+    method = bcfg.get("calibration", "isotonic")
+    if method not in CALIBRATIONS:
+        raise ValueError(f"unknown behavior_model.calibration '{method}' "
+                         f"({' | '.join(CALIBRATIONS)})")
     base = _base_classifier(cfg)
-    splits, _ = _cv_splits(y, cfg["behavior_model"].get("calibration_folds", 3), seed)
-    if splits:
+    if method == "none":
+        return base, False
+    splits, _ = _cv_splits(y, bcfg.get("calibration_folds", 3), seed, groups)
+    if not splits:
+        return base, False
+    if method == "isotonic":
         return CalibratedClassifierCV(base, cv=splits, method="isotonic"), True
-    return base, False
+    lams = tuple(bcfg.get("dirichlet_lambdas", (1e-4, 1e-3, 1e-2, 1e-1, 1.0)))
+    return CrossFitCalibratedClassifier(base, method, splits, lams, seed), True
 
 
 def _fit_pipeline(ds: Dataset, cfg: dict, X: pd.DataFrame, y: np.ndarray,
                   seed: int) -> tuple[Pipeline, bool]:
-    clf, calibrated = _make_classifier(cfg, y, seed)
+    by = cfg["behavior_model"].get("calibration_groups", "play")
+    if by not in ("play", "game"):
+        raise ValueError(f"unknown behavior_model.calibration_groups '{by}' (play | game)")
+    groups = ds.df.loc[X.index, "game_id"].to_numpy() if by == "game" else None
+    clf, calibrated = _make_classifier(cfg, y, seed, groups)
     pipe = Pipeline([("prep", build_gbm_preprocessor(ds)), ("clf", clf)])
     pipe.fit(X, y)
     return pipe, calibrated

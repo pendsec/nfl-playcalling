@@ -124,6 +124,7 @@ def compare_policies(
     baseline_name: str = "greedy_baseline",
     candidate_name: str = "conservative_candidate",
     graph_version: str | None = None,
+    judge: BehaviorModel | None = None,
 ) -> VersionComparison:
     """Score two policies by DR on the same holdout rows and gate on the diff.
 
@@ -133,10 +134,13 @@ def compare_policies(
 
     `margin` is in reward (−EPA) units per play: differences smaller than this
     are treated as not worth blocking on regardless of significance.
+
+    `judge` supplies the propensities the DR weights use when they should not be
+    the policies' own (`src.models.behavior.judge`); `beh` otherwise.
     """
     df = ds.df
     return compare_policy_arrays(
-        q.predict_all_actions(df), beh.propensity(df),
+        q.predict_all_actions(df), (judge if judge is not None else beh).propensity(df),
         df[ds.action_col].to_numpy(), df[ds.reward_col].to_numpy(),
         baseline_probs, candidate_probs, weight_clip=weight_clip, margin=margin,
         baseline_name=baseline_name, candidate_name=candidate_name,
@@ -193,6 +197,7 @@ def compare_to_baseline(
     cfg: dict,
     ensemble=None,
     candidate=None,
+    judge: BehaviorModel | None = None,
 ) -> VersionComparison:
     """The concrete gate: behavior-constrained greedy vs the configured
     candidate (`policy.type`: conservative or safe) on holdout.
@@ -205,6 +210,7 @@ def compare_to_baseline(
     isolates the decision rule — the thing that actually differs between them.
     Rebuilding the baseline from a separately-refit model stack would confound
     the policy change with the model change and tell us nothing about either.
+    `judge` is the holdout's pi_b for the DR weights (`fit_judge_behavior`).
     """
     from ..policy.greedy import learn_greedy_policy
     from ..policy.safe import learn_policy
@@ -223,6 +229,7 @@ def compare_to_baseline(
         margin=ecfg.get("regression_margin", 0.02),
         baseline_name=ecfg.get("baseline_name", "greedy_baseline"),
         candidate_name=ecfg.get("candidate_name", "conservative_candidate"),
+        judge=judge,
     )
 
 
