@@ -56,7 +56,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
-from src.evaluation.invariance import clustered_mean_se
+from src.stats import mean_se
 from src.models.behavior.propensity import fit_behavior_model
 from src.models.outcome.q_model import (_check_conditions_on_adjustment_set, fit_q_ensemble,
                                         fit_q_model)
@@ -130,7 +130,7 @@ def calibration_slope(a_hat: np.ndarray, target: np.ndarray, clusters: np.ndarra
 
 def _paired_lift(q_judge, pi_judge, probs, a, r, clip, games):
     base = dr_per_play(q_judge, pi_judge, pi_judge, a, r, clip)
-    return clustered_mean_se(dr_per_play(q_judge, pi_judge, probs, a, r, clip) - base, games)
+    return mean_se(dr_per_play(q_judge, pi_judge, probs, a, r, clip) - base, games)
 
 
 def benchmark(train: Dataset, test: Dataset, cfg: dict, candidates: list[str] | None = None,
@@ -179,7 +179,7 @@ def benchmark(train: Dataset, test: Dataset, cfg: dict, candidates: list[str] | 
         loss_rows = np.where(support, (adv - target) ** 2, 0.0).sum(1) / support.sum(1)
         if base_loss is None:
             base_loss = loss_rows
-        d_loss, d_loss_se = clustered_mean_se(loss_rows - base_loss, games)
+        d_loss, d_loss_se = mean_se(loss_rows - base_loss, games)
         slope, slope_se = calibration_slope(adv[support], target[support], cell_games)
         g_lift, g_se = _paired_lift(q_judge, pi_b, np.eye(test.n_actions)[greedy], a, r,
                                     wclip, games)

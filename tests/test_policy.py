@@ -25,6 +25,8 @@ from src.ope.doubly_robust import dr_policy_value
 from src.policy.conservative import learn_conservative_policy
 from src.policy.greedy import learn_greedy_policy
 
+GV = scm.version_tag()
+
 
 def test_conservative_not_worse_than_behavior(fitted):
     """DR should rate the conservative policy at least as good as pi_b."""
@@ -34,8 +36,9 @@ def test_conservative_not_worse_than_behavior(fitted):
     q_all = q.predict_all_actions(test.df)
     pi_b = beh.propensity(test.df)
     out = policy.act(test.df)
-    v_pi = dr_policy_value(q_all, pi_b, out["policy_probs"], a, r, WEIGHT_CLIP).value
-    v_b = dr_policy_value(q_all, pi_b, pi_b, a, r, WEIGHT_CLIP).value
+    v_pi = dr_policy_value(q_all, pi_b, out["policy_probs"], a, r, WEIGHT_CLIP,
+                           graph_version=GV).value
+    v_b = dr_policy_value(q_all, pi_b, pi_b, a, r, WEIGHT_CLIP, graph_version=GV).value
     assert v_pi >= v_b - 1e-6
 
 
@@ -98,7 +101,8 @@ def test_regression_gate_catches_a_deliberately_bad_policy(fitted):
 
     cmp = compare_policies(test, q, beh, good["policy_probs"], bad_probs,
                            weight_clip=WEIGHT_CLIP, margin=0.02,
-                           baseline_name="greedy_baseline", candidate_name="worst_q")
+                           baseline_name="greedy_baseline", candidate_name="worst_q",
+                           graph_version=GV)
     assert cmp.regressed
     assert cmp.verdict == "REGRESSION"
     assert cmp.to_record()["blocks_merge"] is True

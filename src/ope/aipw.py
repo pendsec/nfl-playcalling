@@ -29,31 +29,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-
-def _aipw_scores(
-    q_d: np.ndarray,
-    pi_b_d: np.ndarray,
-    took_d: np.ndarray,
-    rewards: np.ndarray,
-    weight_clip: float,
-    self_normalize: bool,
-) -> np.ndarray:
-    """Per-play AIPW pseudo-outcomes for one fixed action d.
-
-    `took_d` is the 0/1 indicator that play i actually took action d. Plays that
-    took some other call contribute only the direct-method term q(s_i, d).
-    """
-    w = np.where(took_d, 1.0 / pi_b_d, 0.0)
-    w = np.clip(w, 0.0, weight_clip)
-
-    total = w.sum()
-    if total <= 0:
-        # Action never taken on these rows: no residual correction is possible,
-        # so the contrast falls back to the pure direct method for this action.
-        return q_d.copy()
-    if self_normalize:
-        w = w * (len(rewards) / total)
-    return q_d + w * (rewards - q_d)
+from ..stats import mean_se
+from .doubly_robust import dr_per_play
 
 
 def aipw_contrasts(
@@ -76,9 +53,12 @@ def aipw_contrasts(
     actions = np.asarray(actions)
 
     took = actions[:, None] == np.arange(k)[None, :]
+    # psi_d is the DR score of the policy "always call d". Plays that took another
+    # call get zero weight, so they contribute only q(s_i, d); if d was never
+    # taken, there is no correction and the contrast is the direct method alone.
     psi = np.column_stack([
-        _aipw_scores(q_all[:, d], pi_b[:, d], took[:, d], rewards,
-                     weight_clip, self_normalize)
+        dr_per_play(q_all, pi_b, np.eye(k)[np.full(n, d)], actions, rewards,
+                    weight_clip, self_normalize)
         for d in range(k)
     ])
 
@@ -88,9 +68,7 @@ def aipw_contrasts(
     for d in range(k):
         if d == baseline:
             continue
-        diff = psi[:, d] - psi_base
-        ate = float(diff.mean())
-        se = float(diff.std(ddof=1) / np.sqrt(n))
+        ate, se = mean_se(psi[:, d] - psi_base)
         rows.append({
             "action": action_labels.get(d, d),
             "baseline": action_labels.get(baseline, baseline),

@@ -36,6 +36,7 @@ from ..models.behavior.propensity import fit_behavior_model
 from ..ope.doubly_robust import dr_per_play
 from ..schemas.behavior import BehaviorModel
 from ..schemas.dataset import Dataset
+from ..stats import mean_se
 
 
 def alignment_frames(df: pd.DataFrame, cfg: dict) -> list[pd.DataFrame]:
@@ -89,8 +90,7 @@ def level1_on_dropbacks(policy1, beh1_db: BehaviorModel, df: pd.DataFrame) -> di
     return {"probs": probs, "deferred": deferred, "chosen": out["chosen"]}
 
 
-def level2_under_each_alignment(policy2, beh2: BehaviorModel, q2, df: pd.DataFrame,
-                                cfg: dict) -> dict:
+def level2_under_each_alignment(policy2, df: pd.DataFrame, cfg: dict) -> dict:
     """Level-2 policy, behavior and Q under every alignment: each (n, K1, K2)."""
     pol, beh, q, deferred = [], [], [], []
     for f in alignment_frames(df, cfg):
@@ -104,7 +104,7 @@ def level2_under_each_alignment(policy2, beh2: BehaviorModel, q2, df: pd.DataFra
 
 
 def evaluate_factored(df: pd.DataFrame, cfg: dict, policy1, policy2, beh1_db: BehaviorModel,
-                      beh2: BehaviorModel, q2, weight_clip: float = 20.0,
+                      weight_clip: float = 20.0,
                       judges: tuple | None = None) -> dict:
     """Paired DR of the four factorings against the coordinator, on dropbacks.
 
@@ -123,7 +123,7 @@ def evaluate_factored(df: pd.DataFrame, cfg: dict, policy1, policy2, beh1_db: Be
     """
     k2 = policy2.n_actions
     lvl1 = level1_on_dropbacks(policy1, beh1_db, df)
-    lvl2 = level2_under_each_alignment(policy2, beh2, q2, df, cfg)
+    lvl2 = level2_under_each_alignment(policy2, df, cfg)
     if judges is not None:
         judge1, judge2 = judges
         p1_b = judge1.propensity(df)
@@ -146,11 +146,10 @@ def evaluate_factored(df: pd.DataFrame, cfg: dict, policy1, policy2, beh1_db: Be
     rows = []
     for name, probs in policies.items():
         score = dr_per_play(q_joint, pi_b, probs, actions, rewards, weight_clip)
-        delta = score - base
-        rows.append({"policy": name, "value": score.mean(),
-                     "se": score.std(ddof=1) / np.sqrt(len(score)),
-                     "lift": delta.mean(),
-                     "lift_se": delta.std(ddof=1) / np.sqrt(len(delta))})
+        value, se = mean_se(score)
+        lift, lift_se = mean_se(score - base)
+        rows.append({"policy": name, "value": value, "se": se, "lift": lift,
+                     "lift_se": lift_se})
     logged = df["l1_action"].to_numpy()
     return {
         "table": pd.DataFrame(rows),

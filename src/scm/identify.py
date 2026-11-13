@@ -27,7 +27,6 @@ narrower question than the one a coach would ask.
 
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from . import graph as scm
@@ -185,34 +184,3 @@ def is_action_observed(ds: Dataset, action: int, down: int) -> bool:
     """Was `action` ever observed on `down`? (helper for positivity-hole checks)."""
     m = ds.df["down"].astype(int) == down
     return bool((ds.df.loc[m, ds.action_col] == action).any())
-
-
-def visualize_dag(save_path: str, graph: CausalGraph | None = None) -> None:
-    """Draw the abstract SCM DAG with networkx (dev artifact)."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import networkx as nx
-
-    g = nx.DiGraph()
-    graph = graph or scm.SHELL_PRESSURE_GRAPH
-    g.add_edges_from(graph.edges)
-    color = {n: ("#D0021B" if n == graph.treatment else
-                 "#2C3E50" if n == graph.outcome else
-                 "#9B59B6" if n in graph.unobserved else
-                 "#E87040" if n in graph.mediators else
-                 "#7F8C8D" if n in graph.selection else
-                 "#C0553B" if n in graph.defensive_choice else "#4A90D9")
-             for n in g.nodes()}
-    fig, ax = plt.subplots(figsize=(11, 8))
-    pos = nx.spring_layout(g, seed=1)
-    nx.draw_networkx(
-        g, pos=pos, ax=ax, node_color=[color[n] for n in g.nodes()],
-        node_size=2600, font_size=8, font_color="white", font_weight="bold",
-        edge_color="#555555", arrows=True, arrowsize=16,
-    )
-    ax.set_title("Defensive Playcall — Causal DAG", fontweight="bold")
-    ax.axis("off")
-    fig.tight_layout()
-    fig.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)

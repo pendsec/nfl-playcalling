@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from ..schemas.ope import OPEResult
+from .ipw import importance_weights
 
 
 def _msm_correction_bound(g: np.ndarray, w: np.ndarray, gamma: float, want_max: bool) -> float:
@@ -72,12 +73,11 @@ def sensitivity_bounds(
     If `compare_value` (e.g. V(pi_b)) is given, each row flags whether the policy
     still beats it under that Gamma — i.e. whether the improvement is robust.
     """
-    n = len(rewards)
-    idx = np.arange(n)
+    idx = np.arange(len(rewards))
     actions = np.asarray(actions)
 
     dm_mean = float((policy_probs * q_all).sum(axis=1).mean())
-    w = np.clip(policy_probs[idx, actions] / pi_b[idx, actions], 0.0, weight_clip)
+    w = importance_weights(pi_b, policy_probs, actions, weight_clip)
     g = rewards - q_all[idx, actions]
 
     rows = []

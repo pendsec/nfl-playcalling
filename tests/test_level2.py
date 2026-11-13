@@ -141,7 +141,7 @@ def test_factored_judges_replace_only_the_coordinators_mix(l2):
     """Judges equal to the policies' own pi_b reproduce the default exactly; a
     different coverage judge moves the coordinator but not the policies."""
     df, cfg = l2["test2"].df, l2["cfg"]
-    args = (df, cfg, l2["pol1"], l2["pol2"], l2["beh1_db"], l2["beh2"], l2["q2"])
+    args = (df, cfg, l2["pol1"], l2["pol2"], l2["beh1_db"])
     same = evaluate_factored(*args, judges=(l2["beh1_db"], l2["beh2"]))
     np.testing.assert_allclose(same["pi_b"], l2["eval"]["pi_b"])
     pd.testing.assert_frame_equal(same["table"], l2["eval"]["table"])

@@ -12,12 +12,11 @@ V2 by projection, and tests whether the call's effects are invariant across
 team-seasons (with --transfer, also leave-one-team/season-out evaluation).
 
 Usage:
-    python run.py                          # uses configs/v2.yaml (real SF data)
-    python run.py --config configs/v2.yaml
+    python run.py                          # configs/v3.yaml: every defense, every
+                                           # snap, personnel package x front
     python run.py --source synthetic       # known-SCM data, no network
-    python run.py --config configs/v3.yaml # every defense, every snap:
-                                           # personnel package x front
-    python run.py --config configs/v3.yaml --transfer   # + transfer (~1 hour)
+    python run.py --transfer               # + transfer (~1 hour)
+    python run.py --config configs/v2.yaml # one defense's coverage, dropbacks only
 """
 
 from __future__ import annotations
@@ -38,18 +37,17 @@ from src.scm import graph as scm
 from src.scm import identify
 from src.data.load import (load_pbp, load_ftn, merge_ftn, ftn_coverage,
                            generate_synthetic_alignment,
-                           generate_synthetic, true_policy_value)
+                           generate_synthetic)
 from src.data.features import (action_scheme, assert_ftn_coverage, build_dataset,
                                build_level2_dataset, level2_config,
                                slice_report, time_aware_split)
 from src.models.behavior.propensity import fit_behavior_model
 from src.models.behavior.judge import fit_judge_behavior, judge_mode
 from src.models.calibration import weight_balance
-from src.evaluation.invariance import clustered_mean_se
-from src.ope.doubly_robust import dr_per_play
+from src.stats import mean_se
 from src.models.outcome.q_model import fit_q_model, crossfit_q, fit_q_ensemble
-from src.ope.direct_method import behavior_recovery_check, dm_policy_value
-from src.ope.doubly_robust import dr_policy_value
+from src.ope.direct_method import behavior_recovery_check
+from src.ope.doubly_robust import dr_per_play, dr_policy_value
 from src.ope.aipw import aipw_contrasts
 from src.ope.ladder import ope_ladder
 from src.ope.sensitivity import sensitivity_bounds, attach as attach_sensitivity
@@ -257,7 +255,7 @@ def main(config_path: str, source_override: str | None, transfer: bool = False) 
         base = dr_per_play(q_te, pib_te, pib_te, a_te, r_te, weight_clip)
         games = test.df["game_id"].to_numpy()
         for tag, probs in (("as built", out["policy_probs"]), ("anchored", anchored)):
-            d, se = clustered_mean_se(dr_per_play(q_te, pib_te, probs, a_te, r_te,
+            d, se = mean_se(dr_per_play(q_te, pib_te, probs, a_te, r_te,
                                                   weight_clip) - base, games)
             judge_row[f"lift_{tag.replace(' ', '_')}"], judge_row[f"lift_{tag.replace(' ', '_')}_se"] = d, se
             print(f"    lift {tag:<9}: {d:+.4f} ± {1.96 * se:.4f} (paired, games clustered)")
@@ -415,7 +413,7 @@ def _level2(cfg, pbp, ds1, policy1, weight_clip) -> dict:
         judge1_db = fit_judge_behavior(dropback_alignment_dataset(train2, cfg),
                                        dropback_alignment_dataset(test2, cfg), cfg, beh1_db)
         judges = (judge1_db, judge2)
-    fac = evaluate_factored(test2.df, cfg, policy1, policy2, beh1_db, beh2, q2, weight_clip,
+    fac = evaluate_factored(test2.df, cfg, policy1, policy2, beh1_db, weight_clip,
                             judges=judges)
     print(f"  per charted dropback, play held a dropback (n={len(test2.df):,}); "
           f"level 1 departs on {fac['level1_departs']:.1%}, level 2 on "
@@ -578,7 +576,7 @@ def _report_judge(cfg, a, p_policy, p_judge, labels, games, indent="  ") -> dict
               f"{row['train_fit_log_loss']:.3f}; largest calibration-in-the-large gap "
               f"{row['train_fit_citl_max']:.3f} ({row['train_fit_citl_call']})")
     else:
-        d, se = clustered_mean_se(row["_judge_rows"] - row["_train_fit_rows"], games)
+        d, se = mean_se(row["_judge_rows"] - row["_train_fit_rows"], games)
         row["log_loss_diff"], row["log_loss_diff_se"] = d, se
         print(f"{indent}judge's pi_b: training seasons + the holdout's other games, season in "
               f"the state, {cfg['ope'].get('judge_folds', 5)} folds by game (calls, never rewards)")
@@ -616,7 +614,7 @@ def _save_outputs(cfg, ds, q_all_train, v_behavior, v_policy, sens, contrasts,
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v2.yaml")
+    ap.add_argument("--config", default="configs/v3.yaml")
     ap.add_argument("--source", default=None, choices=["nflfastR", "synthetic"])
     ap.add_argument("--transfer", action="store_true",
                     help="also run leave-one-team-out / leave-one-season-out (~1 hour)")

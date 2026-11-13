@@ -5,6 +5,11 @@ version evaluated against the previous via OPE on a held-out season; regressions
 block merge". It scores the incumbent baseline policy and the candidate policy
 by DR on the *same* holdout plays and gates on the paired difference.
 
+`projection_gate` gates the factored policy against the one-defense coverage
+policy on that one's own question. `invariance` tests whether the call's effects
+differ across team-seasons, and `transfer` refits the policy without a team or a
+season and scores it there.
+
 The synthetic-SCM regression suite (simulate from a known SCM, assert the
 pipeline recovers the truth) lives in tests/, where pytest can gate on it.
 """
@@ -14,8 +19,7 @@ from .version_compare import (
     compare_policies,
     compare_policy_arrays,
     compare_to_baseline,
-    to_frame,
 )
 
 __all__ = ["VersionComparison", "compare_policies", "compare_policy_arrays",
-           "compare_to_baseline", "to_frame"]
+           "compare_to_baseline"]

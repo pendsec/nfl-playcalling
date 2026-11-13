@@ -46,12 +46,13 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from src.evaluation.invariance import clustered_mean_se
+from src.stats import mean_se
 from src.models.behavior.propensity import fit_behavior_model
-from src.models.calibration import (MatrixScaler, brier_score, calibration_in_the_large,
+from src.models.calibration import (calibration_in_the_large,
                                     calibration_report, weight_balance)
 from src.models.outcome.q_model import fit_q_model
 from src.ope.doubly_robust import dr_per_play
+from src.ope.ipw import ipw_per_play
 from src.schemas.behavior import clip_normalize
 from src.schemas.dataset import Dataset
 
@@ -124,18 +125,15 @@ def scored_crossfit(test: Dataset, cfg: dict, n_folds: int = SCORED_FOLDS,
     """pi_b on the scored season, each game's snaps from a model that never saw
     that game. With `train`, every fold also fits on the training seasons, and
     the season joins the state so the model can tell the mixes apart."""
-    from src.evaluation.transfer import _subset, game_folds
+    from src.folds import game_folds
     fold = game_folds(test.df, n_folds, cfg["seed"])
     p = np.empty((len(test.df), test.n_actions))
     for f in range(n_folds):
         te = fold == f
-        fit = _subset(test, ~te)
+        fit = test.subset(~te)
         if train is not None:
-            fit = Dataset(df=pd.concat([train.df, fit.df], ignore_index=True),
-                          numeric_state=train.numeric_state + ["season"],
-                          categorical_state=train.categorical_state,
-                          action_col=train.action_col, reward_col=train.reward_col,
-                          n_actions=train.n_actions, action_labels=train.action_labels)
+            fit = train.replace(df=pd.concat([train.df, fit.df], ignore_index=True),
+                                numeric_state=train.numeric_state + ["season"])
         beh = fit_behavior_model(fit, cfg, diagnose=False)[0]
         p[te] = beh.propensity(test.df[te])
     return p
@@ -162,14 +160,6 @@ def ess_ratio(y: np.ndarray, p: np.ndarray) -> float:
     w = 1.0 / p[np.arange(len(y)), y]
     w = w / w.mean()
     return float(1.0 / (w ** 2).mean())
-
-
-def ipw_per_play(pi: np.ndarray, probs: np.ndarray, a: np.ndarray, r: np.ndarray,
-                 weight_clip: float) -> np.ndarray:
-    """Self-normalized IPW per play (mean = the estimate)."""
-    idx = np.arange(len(a))
-    w = np.clip(probs[idx, a] / pi[idx, a], 0.0, weight_clip)
-    return w * r / w.mean()
 
 
 def target_policies(train: Dataset, test: Dataset, cfg: dict, k: int) -> dict[str, np.ndarray]:
@@ -200,7 +190,7 @@ def score_candidate(name: str, p: np.ndarray, ctx: dict) -> dict:
            "ess_ratio": ess_ratio(y, p),
            "support_share": float((p >= thr).mean())}
     if "base_rows" in ctx:
-        row["log_loss_vs_isotonic"], row["log_loss_vs_isotonic_se"] = clustered_mean_se(
+        row["log_loss_vs_isotonic"], row["log_loss_vs_isotonic_se"] = mean_se(
             rl - ctx["base_rows"], games)
     for c in range(p.shape[1]):
         row[f"balance_{c}"] = float(wb[c])
@@ -209,11 +199,11 @@ def score_candidate(name: str, p: np.ndarray, ctx: dict) -> dict:
     a, r, wclip, q = ctx["a"], ctx["r"], ctx["wclip"], ctx["q_judge"]
     ipw_err, dr_err = [], []
     for pname, probs in ctx["policies"].items():
-        ipw = float(ipw_per_play(p, probs, a, r, wclip).mean())
+        ipw = float(ipw_per_play(p, probs, a, r, wclip, self_normalize=True).mean())
         dr = float(dr_per_play(q, p, probs, a, r, wclip).mean())
         if pname in ("safe", "greedy"):
             base = dr_per_play(q, p, p, a, r, wclip)
-            lift, se = clustered_mean_se(dr_per_play(q, p, probs, a, r, wclip) - base, games)
+            lift, se = mean_se(dr_per_play(q, p, probs, a, r, wclip) - base, games)
             row[f"{pname}_dr_lift"], row[f"{pname}_dr_lift_se"] = lift, se
             row[f"{pname}_ipw"], row[f"{pname}_dr"] = ipw, dr
         if ctx["q_true"] is not None:

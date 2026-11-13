@@ -23,11 +23,11 @@ from __future__ import annotations
 import numpy as np
 
 from ..schemas.ope import OPEResult
-from ..scm.graph import version_tag
 
 
-def _weights(pi_b: np.ndarray, policy_probs: np.ndarray, actions: np.ndarray,
-             weight_clip: float) -> np.ndarray:
+def importance_weights(pi_b: np.ndarray, policy_probs: np.ndarray, actions: np.ndarray,
+                       weight_clip: float) -> np.ndarray:
+    """pi(a_i|s_i) / pi_b(a_i|s_i) on each logged call, clipped to [0, weight_clip]."""
     idx = np.arange(len(actions))
     actions = np.asarray(actions)
     w = policy_probs[idx, actions] / pi_b[idx, actions]
@@ -43,7 +43,7 @@ def ipw_per_play(
     self_normalize: bool = False,
 ) -> np.ndarray:
     """Per-play IPW scores, whose mean is the IPW (or SNIPW) value."""
-    w = _weights(pi_b, policy_probs, actions, weight_clip)
+    w = importance_weights(pi_b, policy_probs, actions, weight_clip)
     if self_normalize:
         total = w.sum()
         if total <= 0:
@@ -61,21 +61,15 @@ def ipw_policy_value(
     rewards: np.ndarray,
     weight_clip: float = 20.0,
     self_normalize: bool = False,
+    *,
+    graph_version: str,
     policy_name: str = "unspecified",
-    graph_version: str | None = None,
 ) -> OPEResult:
     """IPW value of a (possibly stochastic) policy — no outcome model involved."""
     per_play = ipw_per_play(pi_b, policy_probs, actions, rewards,
                             weight_clip=weight_clip, self_normalize=self_normalize)
-    n = len(per_play)
-    return OPEResult(
-        value=float(np.mean(per_play)),
-        se=float(np.std(per_play, ddof=1) / np.sqrt(n)),
-        n=n,
-        estimator="SNIPW" if self_normalize else "IPW",
-        policy=policy_name,
-        graph_version=graph_version or version_tag(),
-    )
+    return OPEResult.from_scores(per_play, estimator="SNIPW" if self_normalize else "IPW",
+                                 policy=policy_name, graph_version=graph_version)
 
 
 def weight_diagnostics(pi_b: np.ndarray, policy_probs: np.ndarray,

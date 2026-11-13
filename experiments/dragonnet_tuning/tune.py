@@ -32,7 +32,6 @@ error at the tuning fold's size.
 from __future__ import annotations
 
 import copy
-import itertools
 import json
 import os
 import pickle
@@ -48,7 +47,7 @@ from experiments.outcome_models.benchmark import (CANDIDATES, _load, advantages,
                                                   calibration_slope, pseudo_outcomes)
 from src.data.features import time_aware_split
 from src.data.load import true_alignment_q
-from src.evaluation.invariance import clustered_mean_se
+from src.stats import mean_se
 from src.schemas.dataset import Dataset
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -133,7 +132,7 @@ def score(q_hat: np.ndarray, ctx: dict) -> tuple[dict, np.ndarray]:
     sup, pi_b = ctx["support"], ctx["pi_b"]
     adv = advantages(q_hat, pi_b)
     loss = row_loss(adv, ctx["target"], sup)
-    d, se = (clustered_mean_se(loss - ctx["base_loss"], ctx["games"])
+    d, se = (mean_se(loss - ctx["base_loss"], ctx["games"])
              if "base_loss" in ctx else (0.0, 0.0))
     slope, _ = calibration_slope(adv[sup], ctx["target"][sup], ctx["cell_games"])
     out = {"dr_loss": d, "dr_loss_se": se, "cal_slope": slope, "adv_sd": float(adv[sup].std())}
@@ -179,7 +178,7 @@ def run_config(cid: int, params: dict, seeds: list[int], ctx: dict | None = None
         row[k] = float(seed_df[k].mean())
     row["dr_loss_seed_sd"] = float(seed_df["dr_loss"].std(ddof=1)) if len(seeds) > 1 else np.nan
     mean_loss = np.mean(losses, axis=0)
-    row["dr_loss_paired_se"] = clustered_mean_se(mean_loss - ctx["base_loss"], ctx["games"])[1]
+    row["dr_loss_paired_se"] = mean_se(mean_loss - ctx["base_loss"], ctx["games"])[1]
     ens = score(np.mean(qs, axis=0), ctx)[0]
     row.update({f"ens_{k}": v for k, v in ens.items() if not k.endswith("_se")})
     return {"row": row, "loss": mean_loss.astype(np.float32)}
@@ -225,7 +224,7 @@ def tuning_fold(train: Dataset, source: str) -> tuple[Dataset, Dataset, np.ndarr
 
 
 def paired_vs(losses: dict[int, np.ndarray], ref: int, games: np.ndarray) -> dict[int, tuple]:
-    return {c: clustered_mean_se(l - losses[ref], games) for c, l in losses.items()}
+    return {c: mean_se(l - losses[ref], games) for c, l in losses.items()}
 
 
 def selector_check(search_csv: str) -> dict:

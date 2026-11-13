@@ -98,8 +98,8 @@ class ConservativePolicy:
 
         probs = np.zeros_like(q_all)
         probs[np.arange(len(df)), chosen] = 1.0
-        return {"q_all": q_all, "pi_b": pi_b, "scores": scores,
-                "support": support, "chosen": chosen, "policy_probs": probs}
+        return {"q_all": q_all, "pi_b": pi_b, "support": support, "chosen": chosen,
+                "policy_probs": probs}
 
 
 @dataclass

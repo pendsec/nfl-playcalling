@@ -24,8 +24,9 @@ from _config import CFG_INV, CFG_L1
 from src.data.features import build_dataset, level1_components, time_aware_split
 from src.data.load import generate_synthetic_alignment
 from src.evaluation.invariance import (cluster_ids, component_policy, environment_ids,
-                                       heterogeneity, invariance_test)
-from src.evaluation.transfer import game_folds
+                                       invariance_test)
+from src.folds import game_folds
+from src.stats import heterogeneity
 
 
 # ── Pieces ───────────────────────────────────────────────────────────────────

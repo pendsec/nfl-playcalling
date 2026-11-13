@@ -18,10 +18,11 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 from _config import CFG_L1
 from experiments.behavior_calibration.compare import (CANDIDATES, candidate_config,
-                                                      fit_factored, ipw_per_play,
-                                                      scored_crossfit, score_candidate)
+                                                      fit_factored, scored_crossfit,
+                                                      score_candidate)
 from src.data.features import build_dataset, time_aware_split
 from src.data.load import generate_synthetic_alignment, true_alignment_propensity
+from src.ope.ipw import ipw_per_play
 
 
 @pytest.fixture(scope="module")
@@ -83,5 +84,6 @@ def test_ipw_is_self_normalized():
     pi = rng.dirichlet(np.ones(4), 500)
     a = np.array([rng.choice(4, p=row) for row in pi])
     r = np.ones(500)
-    assert ipw_per_play(pi, np.tile(np.eye(4)[1], (500, 1)), a, r, 20.0).mean() == \
+    assert ipw_per_play(pi, np.tile(np.eye(4)[1], (500, 1)), a, r, 20.0,
+                        self_normalize=True).mean() == \
         pytest.approx(1.0)

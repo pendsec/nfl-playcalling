@@ -24,6 +24,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
+from ..stats import mean_se
+
 
 @dataclass
 class OPEResult:
@@ -40,6 +44,14 @@ class OPEResult:
     # `ope.sensitivity.attach`; None means the bound has not been computed yet,
     # which `to_record()` reports honestly rather than silently omitting.
     sensitivity: Any | None = field(default=None, repr=False)
+
+    @classmethod
+    def from_scores(cls, per_play: np.ndarray, *, estimator: str, policy: str,
+                    graph_version: str) -> "OPEResult":
+        """The estimate whose per-play scores are `per_play`: their mean and iid SE."""
+        value, se = mean_se(per_play)
+        return cls(value=value, se=se, n=len(per_play), estimator=estimator, policy=policy,
+                   graph_version=graph_version)
 
     @property
     def ci95(self) -> tuple[float, float]:

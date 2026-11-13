@@ -24,33 +24,25 @@ import numpy as np
 from ..schemas.dataset import Dataset
 from ..schemas.behavior import BehaviorModel
 from ..schemas.outcome import QModel
-from ..scm.graph import version_tag
 from ..schemas.ope import OPEResult
 from .doubly_robust import dr_policy_value
 
 
-def dm_policy_value(q_all: np.ndarray, policy_probs: np.ndarray,
-                    policy_name: str = "unspecified",
-                    graph_version: str | None = None) -> OPEResult:
+def dm_policy_value(q_all: np.ndarray, policy_probs: np.ndarray, *, graph_version: str,
+                    policy_name: str = "unspecified") -> OPEResult:
     """Direct-Method value of a (possibly stochastic) policy.
 
     q_all, policy_probs: shape (n, n_actions). policy_probs rows sum to 1.
     """
     per_play = (policy_probs * q_all).sum(axis=1)
-    return OPEResult(
-        value=float(per_play.mean()),
-        se=float(per_play.std(ddof=1) / np.sqrt(len(per_play))),
-        n=len(per_play),
-        estimator="DM",
-        policy=policy_name,
-        graph_version=graph_version or version_tag(),
-    )
+    return OPEResult.from_scores(per_play, estimator="DM", policy=policy_name,
+                                 graph_version=graph_version)
 
 
 def behavior_recovery_check(
     ds: Dataset, q: QModel, beh: BehaviorModel,
     q_all: np.ndarray | None = None, weight_clip: float = 20.0,
-    graph_version: str | None = None,
+    *, graph_version: str,
 ) -> dict:
     """Smoke test: does OPE recover the behavior policy's mean reward?
 

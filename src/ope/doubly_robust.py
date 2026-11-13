@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..scm.graph import version_tag
 from ..schemas.ope import OPEResult
+from .ipw import importance_weights
 
 
 def dr_per_play(
@@ -53,8 +53,7 @@ def dr_per_play(
     dm = (policy_probs * q_all).sum(axis=1)
 
     # Importance weights on the taken action, clipped for stability.
-    w = policy_probs[idx, actions] / pi_b[idx, actions]
-    w = np.clip(w, 0.0, weight_clip)
+    w = importance_weights(pi_b, policy_probs, actions, weight_clip)
     residual = rewards - q_all[idx, actions]
 
     if self_normalize and w.sum() > 0:
@@ -72,25 +71,21 @@ def dr_policy_value(
     rewards: np.ndarray,
     weight_clip: float = 20.0,
     self_normalize: bool = True,
+    *,
+    graph_version: str,
     policy_name: str = "unspecified",
-    graph_version: str | None = None,
 ) -> OPEResult:
     """Doubly-robust value of a (possibly stochastic) policy.
 
     All array args are aligned by play. q_all / pi_b / policy_probs are
-    (n, n_actions); actions and rewards are length n. Pass `graph_version` from
-    the graph the models were fit under (`scm.graph_for(cfg).version_tag()`);
-    it defaults to the shell x pressure graph.
+    (n, n_actions); actions and rewards are length n. `graph_version` is the
+    graph the models were fit under (`scm.graph_for(cfg).version_tag()`).
     """
-    n = len(rewards)
     per_play = dr_per_play(q_all, pi_b, policy_probs, actions, rewards,
                            weight_clip=weight_clip, self_normalize=self_normalize)
+    return OPEResult.from_scores(per_play, estimator=dr_estimator(self_normalize),
+                                 policy=policy_name, graph_version=graph_version)
 
-    return OPEResult(
-        value=float(per_play.mean()),
-        se=float(per_play.std(ddof=1) / np.sqrt(n)),
-        n=n,
-        estimator="DR-SN" if self_normalize else "DR",
-        policy=policy_name,
-        graph_version=graph_version or version_tag(),
-    )
+
+def dr_estimator(self_normalize: bool) -> str:
+    return "DR-SN" if self_normalize else "DR"

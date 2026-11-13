@@ -205,11 +205,7 @@ def fit_q_ensemble(ds: Dataset, cfg: dict, fit=None):
     for b in range(n_boot):
         pick = rng.integers(0, len(uniq), len(uniq))
         idx = np.concatenate([rows_of[g] for g in pick])
-        boot = Dataset(df=df.iloc[idx].reset_index(drop=True),
-                       numeric_state=ds.numeric_state,
-                       categorical_state=ds.categorical_state,
-                       action_col=ds.action_col, reward_col=ds.reward_col,
-                       n_actions=ds.n_actions, action_labels=ds.action_labels)
+        boot = ds.subset(idx)
         bcfg = {**cfg, "seed": int(cfg["seed"]) + 1 + b}
         members.append((fit or fit_q_model)(boot, bcfg))
     return QEnsemble(members=members, n_actions=ds.n_actions)
@@ -262,11 +258,7 @@ def _crossfit_generic(ds: Dataset, cfg: dict) -> np.ndarray:
     kf = KFold(n_splits=cfg["outcome_model"].get("cross_fit_folds", 5),
                shuffle=True, random_state=cfg["seed"])
     for tr, va in kf.split(ds.df):
-        fold = Dataset(df=ds.df.iloc[tr].reset_index(drop=True), numeric_state=ds.numeric_state,
-                       categorical_state=ds.categorical_state, action_col=ds.action_col,
-                       reward_col=ds.reward_col, n_actions=ds.n_actions,
-                       action_labels=ds.action_labels)
-        mu[va] = fit_q_model(fold, cfg).predict_all_actions(ds.df.iloc[va])
+        mu[va] = fit_q_model(ds.subset(tr), cfg).predict_all_actions(ds.df.iloc[va])
     return mu
 
 

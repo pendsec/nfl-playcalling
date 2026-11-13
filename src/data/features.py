@@ -672,15 +672,5 @@ def _expanding_mean(df: pd.DataFrame, group_col: str, value_col: str) -> pd.Seri
 
 def time_aware_split(ds: Dataset, holdout_season: int) -> tuple[Dataset, Dataset]:
     """Split by season — never randomly across plays (avoids temporal leakage)."""
-    train_df = ds.df[ds.df["season"] < holdout_season].reset_index(drop=True)
-    test_df = ds.df[ds.df["season"] >= holdout_season].reset_index(drop=True)
-
-    def _clone(frame: pd.DataFrame) -> Dataset:
-        return Dataset(
-            df=frame, numeric_state=ds.numeric_state,
-            categorical_state=ds.categorical_state, action_col=ds.action_col,
-            reward_col=ds.reward_col, n_actions=ds.n_actions,
-            action_labels=ds.action_labels,
-        )
-
-    return _clone(train_df), _clone(test_df)
+    train = ds.df["season"] < holdout_season
+    return ds.subset(train), ds.subset(~train)

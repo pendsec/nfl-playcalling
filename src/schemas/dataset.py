@@ -8,7 +8,9 @@ pipeline on this object.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+import numpy as np
 import pandas as pd
 
 
@@ -26,3 +28,11 @@ class Dataset:
     @property
     def state_cols(self) -> list[str]:
         return self.numeric_state + self.categorical_state
+
+    def replace(self, **changes) -> "Dataset":
+        """A copy with some fields changed; the rest are shared, not copied."""
+        return replace(self, **changes)
+
+    def subset(self, rows) -> "Dataset":
+        """The rows picked by a boolean mask or integer positions, index reset."""
+        return self.replace(df=self.df.iloc[np.asarray(rows)].reset_index(drop=True))

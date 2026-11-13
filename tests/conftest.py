@@ -113,7 +113,7 @@ def _fit_level2(conf_strength: float) -> dict:
     q2 = fit_q_model(train2, cfg2)
     pol2 = learn_safe_policy(train2, q2, beh2, cfg2, fit_q_ensemble(train2, cfg2))
     beh1_db, _ = fit_dropback_alignment_behavior(train2, cfg)
-    res = evaluate_factored(test2.df, cfg, pol1, pol2, beh1_db, beh2, q2)
+    res = evaluate_factored(test2.df, cfg, pol1, pol2, beh1_db)
     return dict(pbp=pbp, cfg=cfg, cfg2=cfg2, ds1=ds1, ds2=ds2, train2=train2,
                 test2=test2, beh2=beh2, q2=q2, pol1=pol1, pol2=pol2,
                 beh1_db=beh1_db, eval=res)

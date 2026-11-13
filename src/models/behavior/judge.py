@@ -25,9 +25,9 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GroupKFold
 
 from .propensity import fit_behavior_model
+from ...folds import game_folds
 from ...schemas.behavior import BehaviorModel
 from ...schemas.dataset import Dataset
 
@@ -71,12 +71,6 @@ def judge_mode(cfg: dict) -> str:
     return mode
 
 
-def _with(ds: Dataset, df: pd.DataFrame, numeric: list[str]) -> Dataset:
-    return Dataset(df=df, numeric_state=numeric, categorical_state=ds.categorical_state,
-                   action_col=ds.action_col, reward_col=ds.reward_col,
-                   n_actions=ds.n_actions, action_labels=ds.action_labels)
-
-
 def fit_judge_behavior(train: Dataset, test: Dataset, cfg: dict,
                        beh: BehaviorModel | None = None):
     """The judge's pi_b for scoring `test` (see the module docstring).
@@ -90,10 +84,7 @@ def fit_judge_behavior(train: Dataset, test: Dataset, cfg: dict,
     games = test.df["game_id"]
     if games.nunique() < n_folds:
         raise ValueError(f"the judge needs at least {n_folds} scored games, got {games.nunique()}")
-    fold = np.empty(len(test.df), int)
-    gkf = GroupKFold(n_splits=n_folds, shuffle=True, random_state=cfg["seed"])
-    for k, (_, te) in enumerate(gkf.split(test.df, groups=games)):
-        fold[te] = k
+    fold = game_folds(test.df, n_folds, cfg["seed"])
 
     numeric = list(train.numeric_state)
     if "season" not in numeric:
@@ -101,6 +92,6 @@ def fit_judge_behavior(train: Dataset, test: Dataset, cfg: dict,
     models = []
     for k in range(n_folds):
         rows = pd.concat([train.df, test.df[fold != k]], ignore_index=True)
-        models.append(fit_behavior_model(_with(train, rows, numeric), cfg, diagnose=False)[0])
+        models.append(fit_behavior_model(train.replace(df=rows, numeric_state=numeric), cfg, diagnose=False)[0])
     return CrossFitJudge(models=models, game_fold=dict(zip(games, fold)),
                          n_actions=test.n_actions)

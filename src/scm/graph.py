@@ -411,17 +411,5 @@ def version_tag() -> str:
     return SHELL_PRESSURE_GRAPH.version_tag()
 
 
-def adjustment_set() -> set[str]:
-    return SHELL_PRESSURE_GRAPH.adjustment_set()
-
-
 def adjustment_columns() -> list[str]:
     return SHELL_PRESSURE_GRAPH.adjustment_columns()
-
-
-def to_gml() -> str:
-    return SHELL_PRESSURE_GRAPH.to_gml()
-
-
-def describe() -> str:
-    return SHELL_PRESSURE_GRAPH.describe()

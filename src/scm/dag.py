@@ -75,14 +75,6 @@ class CausalGraph:
         """`version+fingerprint` — the string stamped onto every OPE record."""
         return f"{self.version}+{self.fingerprint()}"
 
-    def to_gml(self) -> str:
-        nodes = sorted(self.observed | self.unobserved)
-        lines = ["graph [", "  directed 1"]
-        lines += [f'  node [ id "{n}" label "{n}" ]' for n in nodes]
-        lines += [f'  edge [ source "{s}" target "{t}" ]' for s, t in self.edges]
-        lines.append("]")
-        return "\n".join(lines)
-
     def describe(self) -> str:
         """Human-readable summary for the run log."""
         lines = [

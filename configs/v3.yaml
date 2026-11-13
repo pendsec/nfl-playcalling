@@ -21,7 +21,6 @@ data:
   use_ftn: true               # FTN supplies n_defense_box; 2022+ only
   ftn_min_coverage: 0.80
   cache_dir: data/raw
-  processed_dir: data/processed
 
 action:
   scheme: level1              # the treatment: personnel package x front

@@ -25,11 +25,14 @@ from src.ope.direct_method import behavior_recovery_check, dm_policy_value
 from src.ope.doubly_robust import dr_policy_value
 from src.ope.sensitivity import attach as attach_sensitivity, sensitivity_bounds
 
+GV = scm.version_tag()     # the shell x pressure graph these fixtures are fit under
+
 
 def test_dr_recovers_behavior_value(fitted):
     """Core smoke test: DR under pi_b recovers the empirical mean reward."""
     rec = behavior_recovery_check(fitted["train"], fitted["q"], fitted["beh"],
-                                  q_all=fitted["mu_train"], weight_clip=WEIGHT_CLIP)
+                                  q_all=fitted["mu_train"], weight_clip=WEIGHT_CLIP,
+                                  graph_version=GV)
     assert rec["passes"], rec
 
 
@@ -48,8 +51,8 @@ def test_dr_robust_to_outcome_misspecification(fitted):
     bad_q = np.zeros((len(r), train.n_actions))
 
     emp = r.mean()
-    dm = dm_policy_value(bad_q, pi_b).value
-    dr = dr_policy_value(bad_q, pi_b, pi_b, a, r, WEIGHT_CLIP).value
+    dm = dm_policy_value(bad_q, pi_b, graph_version=GV).value
+    dr = dr_policy_value(bad_q, pi_b, pi_b, a, r, WEIGHT_CLIP, graph_version=GV).value
     assert abs(dr - emp) < abs(dm - emp)          # DR strictly better
     assert abs(dr - emp) < 0.01                   # and essentially exact
 
@@ -92,7 +95,7 @@ def test_ope_estimates_carry_graph_version_and_estimator(fitted):
     r = df[test.reward_col].to_numpy()
 
     res = dr_policy_value(q_all, pi_b, pi_b, a, r,
-                          weight_clip=WEIGHT_CLIP, policy_name="behavior")
+                          weight_clip=WEIGHT_CLIP, policy_name="behavior", graph_version=GV)
     assert res.estimator == "DR-SN"
     assert res.policy == "behavior"
     assert res.graph_version == scm.version_tag()
@@ -117,9 +120,10 @@ def test_sensitivity_attaches_to_its_own_estimate(fitted):
     r = df[test.reward_col].to_numpy()
     probs = policy.act(df)["policy_probs"]
 
-    v_b = dr_policy_value(q_all, pi_b, pi_b, a, r, WEIGHT_CLIP, policy_name="behavior")
+    v_b = dr_policy_value(q_all, pi_b, pi_b, a, r, WEIGHT_CLIP, policy_name="behavior",
+                          graph_version=GV)
     v_p = dr_policy_value(q_all, pi_b, probs, a, r, WEIGHT_CLIP,
-                          policy_name="conservative")
+                          policy_name="conservative", graph_version=GV)
     sens = sensitivity_bounds(q_all, pi_b, probs, a, r, [1.0, 1.5, 3.0],
                               WEIGHT_CLIP, compare_value=v_b.value,
                               policy_name="conservative")

@@ -31,9 +31,10 @@ from src.ope.doubly_robust import dr_policy_value
 from src.ope.ipw import ipw_policy_value, weight_diagnostics
 from src.ope.ladder import ope_ladder
 from src.ope.sensitivity import sensitivity_bounds
-from src.schemas.dataset import Dataset
 from src.scm import graph as scm
 from src.scm import identify
+
+GV = scm.ALIGNMENT_GRAPH.version_tag()
 
 
 # ── Data layer ───────────────────────────────────────────────────────────────
@@ -127,10 +128,7 @@ def test_every_snap_state_matches_the_alignment_graph(fitted_l1):
 def test_treatment_columns_are_rejected_as_state(fitted_l1):
     """Conditioning on the action being evaluated makes its effect unlearnable."""
     ds = fitted_l1["ds"]
-    polluted = Dataset(df=ds.df, numeric_state=ds.numeric_state + ["n_defense_box"],
-                       categorical_state=ds.categorical_state, action_col=ds.action_col,
-                       reward_col=ds.reward_col, n_actions=ds.n_actions,
-                       action_labels=ds.action_labels)
+    polluted = ds.replace(numeric_state=ds.numeric_state + ["n_defense_box"])
     with pytest.raises(ValueError, match="Treatment column"):
         identify.assert_adjustment_consistency(polluted, scm.ALIGNMENT_GRAPH)
 
@@ -146,7 +144,7 @@ def test_ipw_is_unbiased_with_known_propensities():
     effect = np.array([0.0, 0.3, -0.2])
     r = effect[a] + rng.normal(0, 1, n)
     target = np.zeros((n, k)); target[:, 1] = 1.0          # always action 1
-    est = ipw_policy_value(pi_b, target, a, r, weight_clip=1e9)
+    est = ipw_policy_value(pi_b, target, a, r, weight_clip=1e9, graph_version=GV)
     assert est.value == pytest.approx(0.3, abs=4 * est.se)
     assert est.estimator == "IPW"
 
@@ -154,7 +152,8 @@ def test_ipw_is_unbiased_with_known_propensities():
 def test_snipw_is_undefined_rather_than_zero_without_support():
     pi_b = np.full((4, 2), 0.5); a = np.zeros(4, int); r = np.ones(4)
     never = np.zeros((4, 2)); never[:, 1] = 1.0            # never the logged call
-    assert np.isnan(ipw_policy_value(pi_b, never, a, r, self_normalize=True).value)
+    assert np.isnan(ipw_policy_value(pi_b, never, a, r, self_normalize=True,
+                                    graph_version=GV).value)
 
 
 def test_weight_diagnostics_report_what_the_estimate_rests_on():
@@ -216,7 +215,8 @@ def test_conservative_policy_beats_the_coordinator_in_truth(fitted_l1):
 def test_dr_recovers_the_behavior_policys_true_value(fitted_l1):
     t, q, beh = fitted_l1["test"], fitted_l1["q"], fitted_l1["beh"]
     d = t.df; a = d["action"].to_numpy(); pib = beh.propensity(d)
-    est = dr_policy_value(q.predict_all_actions(d), pib, pib, a, d["reward"].to_numpy())
+    est = dr_policy_value(q.predict_all_actions(d), pib, pib, a, d["reward"].to_numpy(),
+                          graph_version=GV)
     assert est.value == pytest.approx(true_alignment_value(d, a), abs=3 * est.se)
 
 
@@ -238,7 +238,7 @@ def test_dr_recovers_the_true_policy_value_without_confounding(fitted_l1_unconfo
     d = f["test"].df; a = d["action"].to_numpy(); pib = f["beh"].propensity(d)
     out = f["policy"].act(d)
     est = dr_policy_value(f["q"].predict_all_actions(d), pib, out["policy_probs"], a,
-                          d["reward"].to_numpy(), WEIGHT_CLIP)
+                          d["reward"].to_numpy(), WEIGHT_CLIP, graph_version=GV)
     assert est.value == pytest.approx(true_alignment_value(d, out["chosen"]), abs=3 * est.se)
 
 
@@ -451,4 +451,4 @@ def test_gate_scores_the_policy_learned_on_training(fitted_l1, l1_ensemble):
                                                pol.act(f["test"].df)["policy_probs"],
                                                f["test"].df["action"].to_numpy(),
                                                f["test"].df["reward"].to_numpy(),
-                                               WEIGHT_CLIP).value)
+                                               WEIGHT_CLIP, graph_version=GV).value)

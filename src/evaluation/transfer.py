@@ -29,23 +29,16 @@ from typing import Callable
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GroupKFold
 
-from .invariance import clustered_mean_se, heterogeneity
 from ..models.behavior.propensity import fit_behavior_model
 from ..models.outcome.q_model import fit_q_ensemble, fit_q_model
 from ..ope.doubly_robust import dr_per_play
 from ..policy.safe import learn_policy
+from ..folds import game_folds
 from ..schemas.dataset import Dataset
+from ..stats import heterogeneity, mean_se, regresses
 
 SPLITS = {"leave_one_team_out": "defteam", "leave_one_season_out": "season"}
-
-
-def _subset(ds: Dataset, mask: np.ndarray) -> Dataset:
-    return Dataset(df=ds.df[mask].reset_index(drop=True), numeric_state=ds.numeric_state,
-                   categorical_state=ds.categorical_state, action_col=ds.action_col,
-                   reward_col=ds.reward_col, n_actions=ds.n_actions,
-                   action_labels=ds.action_labels)
 
 
 def fit_policy(ds: Dataset, cfg: dict, beh=None, q=None):
@@ -55,15 +48,6 @@ def fit_policy(ds: Dataset, cfg: dict, beh=None, q=None):
     safe = cfg["policy"].get("type", "conservative") == "safe"
     ensemble = fit_q_ensemble(ds, cfg) if safe else None
     return learn_policy(ds, q, beh, cfg, ensemble=ensemble)
-
-
-def game_folds(df: pd.DataFrame, n_folds: int, seed: int) -> np.ndarray:
-    """Fold id per row, whole games together."""
-    fold = np.empty(len(df), int)
-    gkf = GroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
-    for k, (_, te) in enumerate(gkf.split(df, groups=df["game_id"])):
-        fold[te] = k
-    return fold
 
 
 def crossfit_nuisances(ds: Dataset, cfg: dict, n_folds: int | None = None,
@@ -83,7 +67,7 @@ def crossfit_nuisances(ds: Dataset, cfg: dict, n_folds: int | None = None,
     departs = np.zeros(n, bool) if with_policy else None
     for f in range(n_folds):
         te = fold == f
-        train = _subset(ds, ~te)
+        train = ds.subset(~te)
         beh = fit_behavior_model(train, cfg, diagnose=False)[0]
         q = fit_q_model(train, cfg)
         test_df = ds.df[te]
@@ -117,7 +101,7 @@ def transfer_evaluation(ds: Dataset, cfg: dict, nuisances: dict,
         col = SPLITS[split]
         for g in sorted(df[col].unique()):
             held = (df[col] == g).to_numpy()
-            out = fit_policy(_subset(ds, ~held), cfg).act(df[held])
+            out = fit_policy(ds.subset(~held), cfg).act(df[held])
             q, pb, aa, rr = nuisances["q_all"][held], nuisances["pi_b"][held], a[held], r[held]
             base = dr_per_play(q, pb, pb, aa, rr, clip)
             moved = dr_per_play(q, pb, out["policy_probs"], aa, rr, clip)
@@ -128,10 +112,10 @@ def transfer_evaluation(ds: Dataset, cfg: dict, nuisances: dict,
             # transfer" from "the coordinator's mix is not known".
             anchored = np.where(departs[:, None], out["policy_probs"], pb)
             anch = dr_per_play(q, pb, anchored, aa, rr, clip)
-            lift, lift_se = clustered_mean_se(moved - base, games[held])
-            lift_a, lift_a_se = clustered_mean_se(anch - base, games[held])
-            lift_in, lift_in_se = clustered_mean_se(inside - base, games[held])
-            gap, gap_se = clustered_mean_se(moved - inside, games[held])
+            lift, lift_se = mean_se(moved - base, games[held])
+            lift_a, lift_a_se = mean_se(anch - base, games[held])
+            lift_in, lift_in_se = mean_se(inside - base, games[held])
+            gap, gap_se = mean_se(moved - inside, games[held])
             dm = float(((out["policy_probs"] - pb) * q).sum(axis=1).mean())
             rows.append({
                 "split": split, "held_out": str(g), "n": int(held.sum()),
@@ -141,7 +125,7 @@ def transfer_evaluation(ds: Dataset, cfg: dict, nuisances: dict,
                 "lift_anchored": lift_a, "lift_anchored_se": lift_a_se,
                 "lift_in_domain": lift_in, "lift_in_domain_se": lift_in_se,
                 "gap": gap, "gap_se": gap_se,
-                "regresses": bool(lift + 1.96 * lift_se < -margin),
+                "regresses": bool(regresses(lift, lift_se, margin)),
             })
             if progress:
                 progress(f"{split}: {g}")

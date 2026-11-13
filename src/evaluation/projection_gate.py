@@ -80,7 +80,7 @@ def v2_policy_on_holdout(pbp: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
 
 def projection_gate(pbp: pd.DataFrame, cfg: dict, test2: pd.DataFrame, factored: dict,
-                    graph_version: str | None = None) -> VersionComparison:
+                    *, graph_version: str) -> VersionComparison:
     """Gate V3's factored policy against V2's on the gate team's holdout dropbacks.
 
     `test2` is the level-2 holdout frame and `factored` the result of

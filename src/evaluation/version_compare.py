@@ -31,14 +31,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-import pandas as pd
 
 from ..schemas.dataset import Dataset
 from ..schemas.behavior import BehaviorModel
 from ..schemas.outcome import QModel
 from ..schemas.ope import OPEResult
-from ..ope.doubly_robust import dr_per_play, dr_policy_value
+from ..ope.doubly_robust import dr_estimator, dr_per_play
 from ..scm.graph import graph_for
+from ..stats import mean_se, regresses
 
 
 @dataclass
@@ -65,7 +65,7 @@ class VersionComparison:
         below the negative margin. A merely-lower point estimate with a CI that
         still touches -margin is noise, not a regression.
         """
-        return self.diff_ci95[1] < -self.margin
+        return regresses(self.diff, self.diff_se, self.margin)
 
     @property
     def improved(self) -> bool:
@@ -123,7 +123,8 @@ def compare_policies(
     margin: float = 0.02,
     baseline_name: str = "greedy_baseline",
     candidate_name: str = "conservative_candidate",
-    graph_version: str | None = None,
+    *,
+    graph_version: str,
     judge: BehaviorModel | None = None,
 ) -> VersionComparison:
     """Score two policies by DR on the same holdout rows and gate on the diff.
@@ -158,7 +159,8 @@ def compare_policy_arrays(
     margin: float = 0.02,
     baseline_name: str = "baseline",
     candidate_name: str = "candidate",
-    graph_version: str | None = None,
+    *,
+    graph_version: str,
 ) -> VersionComparison:
     """`compare_policies` on precomputed nuisances — for action spaces no single
     fitted model spans, such as the factored alignment x coverage space, whose
@@ -170,23 +172,19 @@ def compare_policy_arrays(
 
     # Paired difference: same play, same Q, same propensities on both sides, so
     # the shared estimation noise cancels instead of adding.
-    delta = cand_scores - base_scores
-    n = len(delta)
-    diff_se = float(delta.std(ddof=1) / np.sqrt(n)) if n > 1 else float("inf")
+    diff, diff_se = mean_se(cand_scores - base_scores)
 
     return VersionComparison(
         baseline_name=baseline_name,
         candidate_name=candidate_name,
-        baseline=dr_policy_value(q_all, pi_b, baseline_probs, actions, rewards,
-                                 weight_clip=weight_clip, policy_name=baseline_name,
-                                 graph_version=graph_version),
-        candidate=dr_policy_value(q_all, pi_b, candidate_probs, actions, rewards,
-                                  weight_clip=weight_clip, policy_name=candidate_name,
-                                  graph_version=graph_version),
-        diff=float(delta.mean()),
+        baseline=OPEResult.from_scores(base_scores, estimator=dr_estimator(True),
+                                       policy=baseline_name, graph_version=graph_version),
+        candidate=OPEResult.from_scores(cand_scores, estimator=dr_estimator(True),
+                                        policy=candidate_name, graph_version=graph_version),
+        diff=diff,
         diff_se=diff_se,
         margin=margin,
-        n=n,
+        n=len(base_scores),
     )
 
 
@@ -231,8 +229,3 @@ def compare_to_baseline(
         candidate_name=ecfg.get("candidate_name", "conservative_candidate"),
         judge=judge,
     )
-
-
-def to_frame(comparisons: list[VersionComparison]) -> pd.DataFrame:
-    """One row per comparison, for `outputs/version_comparison.csv`."""
-    return pd.DataFrame([c.to_record() for c in comparisons])

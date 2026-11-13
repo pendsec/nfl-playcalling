@@ -24,8 +24,9 @@ def ope_ladder(
     actions: np.ndarray,
     rewards: np.ndarray,
     weight_clip: float = 20.0,
+    *,
+    graph_version: str,
     policy_name: str = "unspecified",
-    graph_version: str | None = None,
 ) -> pd.DataFrame:
     """DM, IPW, SNIPW and DR estimates of one policy, one row each."""
     kw = dict(policy_name=policy_name, graph_version=graph_version)

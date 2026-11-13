@@ -59,10 +59,10 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 from ..data.features import LEVEL1_AXES, level1_axes, level1_components
 from ..ope.doubly_robust import dr_per_play
+from ..stats import heterogeneity, mean_se
 
 
 def environment_ids(df: pd.DataFrame, cfg: dict) -> pd.Series:
@@ -82,19 +82,6 @@ def component_policy(pi_b: np.ndarray, comp_of_action: np.ndarray, c: int) -> np
     mask = (comp_of_action == c).astype(float)[None, :]
     p = pi_b * mask
     return p / p.sum(axis=1, keepdims=True)
-
-
-def clustered_mean_se(x: np.ndarray, clusters: np.ndarray) -> tuple[float, float]:
-    """Mean of `x` and its standard error with observations clustered."""
-    x = np.asarray(x, float)
-    mean = float(x.mean())
-    _, inv = np.unique(clusters, return_inverse=True)
-    g = np.bincount(inv, weights=x - mean)
-    n_g = len(g)
-    if n_g < 2:
-        return mean, float("nan")
-    se = np.sqrt((g ** 2).sum() * n_g / (n_g - 1)) / len(x)
-    return mean, float(se)
 
 
 def reference_components(actions: np.ndarray, cfg: dict) -> dict[str, int]:
@@ -122,30 +109,10 @@ def pooled_effects(q_all: np.ndarray, pi_b: np.ndarray, actions: np.ndarray,
                 continue
             pol_c = component_policy(pi_b, comp_of_action[axis], c)
             diff = dr_per_play(q_all, pi_b, pol_c, actions, rewards, clip) - base
-            est, se = clustered_mean_se(diff, games)
+            est, se = mean_se(diff, games)
             rows.append({"axis": axis, "component": names[c], "reference": names[ref],
                          "effect": est, "effect_se": se})
     return pd.DataFrame(rows)
-
-
-def heterogeneity(est: np.ndarray, se: np.ndarray) -> dict:
-    """Cochran's Q, I^2 and the DerSimonian-Laird tau across groups."""
-    est, se = np.asarray(est, float), np.asarray(se, float)
-    ok = np.isfinite(est) & np.isfinite(se) & (se > 0)
-    est, se = est[ok], se[ok]
-    k = len(est)
-    if k < 2:
-        return {"k": k, "pooled": float("nan"), "pooled_se": float("nan"), "q": float("nan"),
-                "p": float("nan"), "i2": float("nan"), "tau": float("nan")}
-    w = 1.0 / se ** 2
-    pooled = float((w * est).sum() / w.sum())
-    q = float((w * (est - pooled) ** 2).sum())
-    df = k - 1
-    c = w.sum() - (w ** 2).sum() / w.sum()
-    tau2 = max(0.0, (q - df) / c)
-    return {"k": k, "pooled": pooled, "pooled_se": float(np.sqrt(1.0 / w.sum())),
-            "q": q, "p": float(stats.chi2.sf(q, df)),
-            "i2": max(0.0, (q - df) / q) if q > 0 else 0.0, "tau": float(np.sqrt(tau2))}
 
 
 # ── The residual contrast, per environment ──────────────────────────────────

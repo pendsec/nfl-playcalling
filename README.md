@@ -255,8 +255,8 @@ pandas 3 stack.)
 ### Run
 
 ```bash
-python run.py                     # real SF nflfastR data (configs/v2.yaml)
-python run.py --source synthetic  # known-SCM data, no network
+python run.py --config configs/v2.yaml                     # one defense (SF), its coverage on dropbacks
+python run.py --config configs/v2.yaml --source synthetic  # known-SCM data, no network
 pytest tests/                     # synthetic-SCM regression tests
 pytest experiments/               # benchmarked alternatives (needs torch, econml)
 ```
@@ -272,12 +272,8 @@ dragonnet` in [`configs/v3.yaml`](configs/v3.yaml)); the gradient-boosted model
 stays the default. Its hyperparameters come from a 48-config search in
 [`experiments/dragonnet_tuning/`](experiments/dragonnet_tuning/).
 
-For a narrated, step-by-step walkthrough with plots (action sparsity, the DAG,
-positivity heatmap, calibration curve, DR recovery, and the sensitivity band),
-open [`notebooks/v2_pipeline_walkthrough.ipynb`](notebooks/v2_pipeline_walkthrough.ipynb).
-It runs the story on real SF data with a synthetic ground-truth validation aside.
-
-All scope lives in [`configs/v2.yaml`](configs/v2.yaml) (team, seasons,
+All scope lives in the config — [`configs/v2.yaml`](configs/v2.yaml) for this
+pipeline, [`configs/v3.yaml`](configs/v3.yaml) for the one below (team, seasons,
 action taxonomy, model hyperparameters, sensitivity γ range).
 
 #### Every defense, every snap
@@ -290,8 +286,8 @@ and the goal line are in the data, and the offense's run/pass *response* to the
 look is inside the estimate rather than selected away.
 
 ```bash
-python run.py --config configs/v3.yaml                     # 2022–24 train, 2025 held out
-python run.py --config configs/v3.yaml --source synthetic  # known-SCM alignment league
+python run.py                     # configs/v3.yaml: 2022–24 train, 2025 held out
+python run.py --source synthetic  # known-SCM alignment league
 ```
 
 Its walkthrough is

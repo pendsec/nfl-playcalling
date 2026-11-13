@@ -36,10 +36,7 @@ def _drifted(train: Dataset, call: int, keep: float, seed: int = 0) -> Dataset:
     rng = np.random.default_rng(seed)
     a = train.df[train.action_col].to_numpy()
     rows = (a != call) | (rng.random(len(a)) < keep)
-    return Dataset(df=train.df[rows].reset_index(drop=True), numeric_state=train.numeric_state,
-                   categorical_state=train.categorical_state, action_col=train.action_col,
-                   reward_col=train.reward_col, n_actions=train.n_actions,
-                   action_labels=train.action_labels)
+    return train.subset(rows)
 
 
 def test_train_judge_is_the_policys_own(league):

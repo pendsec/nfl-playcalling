@@ -5,11 +5,16 @@
                     The constraint is the simplest form of the pessimism CQL
                     formalizes, and it is the baseline the regression gate scores
                     the candidate policy against.
-    conservative  — the shipped policy: the same argmax with a KL-to-behavior
-                    penalty scaled by the Q model's own spread, so it departs
-                    from the DC only where Q is confidently higher.
+    conservative  — the same argmax with a KL-to-behavior penalty scaled by the
+                    Q model's own spread, so it departs from the DC only where Q
+                    is confidently higher.
+    safe          — keeps the coordinator's own mix unless a supported call's
+                    advantage over it clears a bootstrap lower bound (and, for
+                    the box, an allowance for the coordinator's read,
+                    `read_bias`). `learn_policy` dispatches on `policy.type`.
+    hierarchical  — the factored policy: an alignment, then a coverage given
+                    it, scored together per charted dropback.
 
-CLAUDE.md's Step 6 plans the deeper rungs from here — causal pessimism,
-invariant policy learning across teams/seasons, and a hierarchical factored
-policy over the larger action space.
+The policies' decision rules (`act`) live with their dataclasses in
+`src.schemas.policy`; the modules here build them from fitted models.
 """

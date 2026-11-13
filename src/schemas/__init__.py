@@ -4,28 +4,27 @@ collected in one place so the shapes of the data are easy to find and read.
 
     Dataset        the built (S, A, R) table + column metadata   (data layer)
     BehaviorModel  a fitted behavior policy pi_b(A|S)            (Step 3)
-    QModel         a fitted outcome / Q-model Q(S, A)            (Step 4)
+    QModel, PooledQModel, QEnsemble
+                   fitted outcome models Q(S, A) and the bootstrap ensemble (Step 4)
     OPEResult      one off-policy-evaluation estimate + 95% CI   (Step 5)
-    GreedyPolicy   the behavior-constrained greedy baseline       (Step 6)
-    ConservativePolicy  the shipped behavior-regularized policy   (Step 6)
+    GreedyPolicy, ConservativePolicy, SafeImprovementPolicy
+                   the policies, each with its decision rule `act`   (Step 6)
 
-Only the *shapes* live here. The operations that build them (build_dataset,
-fit_behavior_model, fit_q_model, dr_policy_value, learn_conservative_policy, ...)
-stay in their component packages and import these classes from here. You can
-import a shape either from its component module (unchanged) or straight from
-`src.schemas`.
+The operations that build them (build_dataset, fit_behavior_model, fit_q_model,
+dr_policy_value, learn_policy, ...) stay in their component packages and import
+these classes from here.
 """
 
 from .dataset import Dataset
 from .behavior import BehaviorModel, clip_normalize
-from .outcome import QModel
+from .outcome import PooledQModel, QEnsemble, QModel
 from .ope import OPEResult
-from .policy import GreedyPolicy, ConservativePolicy
+from .policy import ConservativePolicy, GreedyPolicy, SafeImprovementPolicy
 
 __all__ = [
     "Dataset",
     "BehaviorModel", "clip_normalize",
-    "QModel",
+    "QModel", "PooledQModel", "QEnsemble",
     "OPEResult",
-    "GreedyPolicy", "ConservativePolicy",
+    "GreedyPolicy", "ConservativePolicy", "SafeImprovementPolicy",
 ]
