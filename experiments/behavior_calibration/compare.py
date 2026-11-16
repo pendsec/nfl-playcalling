@@ -47,6 +47,7 @@ import numpy as np
 import pandas as pd
 
 from src.stats import mean_se
+from src.models.behavior.judge import fit_judge_behavior
 from src.models.behavior.propensity import fit_behavior_model
 from src.models.calibration import (calibration_in_the_large,
                                     calibration_report, weight_balance)
@@ -124,17 +125,18 @@ def scored_crossfit(test: Dataset, cfg: dict, n_folds: int = SCORED_FOLDS,
                     train: Dataset | None = None) -> np.ndarray:
     """pi_b on the scored season, each game's snaps from a model that never saw
     that game. With `train`, every fold also fits on the training seasons, and
-    the season joins the state so the model can tell the mixes apart."""
+    the season joins the state so the model can tell the mixes apart — the
+    pipeline's pooled judge (`fit_judge_behavior`), which this experiment chose."""
+    if train is not None:
+        jcfg = {**cfg, "ope": {**cfg["ope"], "judge_propensity": "pooled_crossfit",
+                               "judge_folds": n_folds}}
+        return fit_judge_behavior(train, test, jcfg).propensity(test.df)
     from src.folds import game_folds
     fold = game_folds(test.df, n_folds, cfg["seed"])
     p = np.empty((len(test.df), test.n_actions))
     for f in range(n_folds):
         te = fold == f
-        fit = test.subset(~te)
-        if train is not None:
-            fit = train.replace(df=pd.concat([train.df, fit.df], ignore_index=True),
-                                numeric_state=train.numeric_state + ["season"])
-        beh = fit_behavior_model(fit, cfg, diagnose=False)[0]
+        beh = fit_behavior_model(test.subset(~te), cfg, diagnose=False)[0]
         p[te] = beh.propensity(test.df[te])
     return p
 
@@ -165,11 +167,11 @@ def ess_ratio(y: np.ndarray, p: np.ndarray) -> float:
 def target_policies(train: Dataset, test: Dataset, cfg: dict, k: int) -> dict[str, np.ndarray]:
     """Fixed policies to evaluate, (n, k) probabilities each: the shipped safe
     policy, the supported greedy argmax of the GBM Q, and 'always call a'."""
-    from src.evaluation.transfer import fit_policy
+    from src.policy.safe import fit_policy
     beh = fit_behavior_model(train, cfg, diagnose=False)[0]
     q = fit_q_model(train, cfg)
     df = test.df
-    pol = {"safe": fit_policy(train, cfg, beh, q).act(df)["policy_probs"]}
+    pol = {"safe": fit_policy(train, cfg, beh, q).policy.act(df)["policy_probs"]}
     support = beh.propensity(df) >= cfg["policy"].get("support_threshold", 0.05)
     greedy = np.where(support, q.predict_all_actions(df), -np.inf).argmax(axis=1)
     pol["greedy"] = np.eye(k)[greedy]

@@ -112,18 +112,8 @@ def load_pbp(seasons: list[int], cache_dir: str = "data/raw") -> pd.DataFrame:
     """
     import nfl_data_py as nfl
 
-    os.makedirs(cache_dir, exist_ok=True)
-    frames = []
-    for yr in seasons:
-        path = os.path.join(cache_dir, f"pbp_{yr}_{CACHE_VERSION}.parquet")
-        if os.path.exists(path):
-            frames.append(pd.read_parquet(path))
-            continue
-        df = nfl.import_pbp_data([yr], downcast=False, cache=False)
-        keep = [c for c in PBP_COLUMNS if c in df.columns]
-        df = df[keep].copy()
-        df.to_parquet(path, index=False)
-        frames.append(df)
+    frames = _cached_seasons(seasons, cache_dir, "pbp", CACHE_VERSION, PBP_COLUMNS,
+                             lambda yr: nfl.import_pbp_data([yr], downcast=False, cache=False))
     return pd.concat(frames, ignore_index=True)
 
 
@@ -136,23 +126,31 @@ def load_ftn(seasons: list[int], cache_dir: str = "data/raw") -> pd.DataFrame:
     """
     import nfl_data_py as nfl
 
-    os.makedirs(cache_dir, exist_ok=True)
-    frames = []
-    for yr in seasons:
-        if yr < FTN_FIRST_SEASON:
-            continue
-        path = os.path.join(cache_dir, f"ftn_{yr}_{FTN_CACHE_VERSION}.parquet")
-        if os.path.exists(path):
-            frames.append(pd.read_parquet(path))
-            continue
-        df = nfl.import_ftn_data([yr])
-        keep = [c for c in FTN_JOIN_KEYS + FTN_COLUMNS if c in df.columns]
-        df = df[keep].copy()
-        df.to_parquet(path, index=False)
-        frames.append(df)
+    frames = _cached_seasons([yr for yr in seasons if yr >= FTN_FIRST_SEASON], cache_dir,
+                             "ftn", FTN_CACHE_VERSION, FTN_JOIN_KEYS + FTN_COLUMNS,
+                             lambda yr: nfl.import_ftn_data([yr]))
     if not frames:
         return pd.DataFrame(columns=FTN_JOIN_KEYS + FTN_COLUMNS)
     return pd.concat(frames, ignore_index=True)
+
+
+def _cached_seasons(seasons, cache_dir: str, prefix: str, version: str,
+                    columns: list[str], fetch) -> list[pd.DataFrame]:
+    """One frame per season, read from `{prefix}_{season}_{version}.parquet` in
+    `cache_dir`, or fetched with `fetch(season)`, cut to `columns` and cached
+    there. The network is hit only for seasons not cached under `version`."""
+    os.makedirs(cache_dir, exist_ok=True)
+    frames = []
+    for yr in seasons:
+        path = os.path.join(cache_dir, f"{prefix}_{yr}_{version}.parquet")
+        if os.path.exists(path):
+            frames.append(pd.read_parquet(path))
+            continue
+        df = fetch(yr)
+        df = df[[c for c in columns if c in df.columns]].copy()
+        df.to_parquet(path, index=False)
+        frames.append(df)
+    return frames
 
 
 def merge_ftn(pbp: pd.DataFrame, ftn: pd.DataFrame) -> pd.DataFrame:
@@ -514,12 +512,7 @@ def generate_synthetic_alignment(
     coach_read = rng.normal(0, 1, n)                   # hidden, never recorded
 
     # ── Behavior: the DC's alignment call ────────────────────────────────────
-    ideal = 5.0 * _sigmoid(p_run_logit)
-    heavy_all = alignment_heaviness(np.arange(12))[None, :]
-    logits = (-0.6 * (heavy_all - ideal[:, None] - team_heavy_bias[defteam][:, None]) ** 2
-              + 0.30 * coach_read[:, None] * (heavy_all - 2.5) / 2.5)
-    logits -= logits.max(axis=1, keepdims=True)
-    p = np.exp(logits)
+    p = np.exp(_alignment_logits(p_run_logit, team_heavy_bias[defteam], coach_read))
     p /= p.sum(axis=1, keepdims=True)
     action = (rng.random(n)[:, None] > np.cumsum(p, axis=1)).sum(axis=1).clip(0, 11)
     heavy = alignment_heaviness(action)
@@ -634,17 +627,25 @@ def true_alignment_propensity(df: pd.DataFrame, n_nodes: int = 40) -> np.ndarray
     what a behavior model fit on the logged state can at best recover."""
     x, w = np.polynomial.hermite_e.hermegauss(n_nodes)
     w = w / w.sum()
-    ideal = 5.0 * _sigmoid(df["_p_run_logit"].to_numpy())
-    bias = df["_heavy_bias"].to_numpy()
-    heavy = alignment_heaviness(np.arange(12))[None, :]
-    base = -0.6 * (heavy - ideal[:, None] - bias[:, None]) ** 2
+    p_run_logit, bias = df["_p_run_logit"].to_numpy(), df["_heavy_bias"].to_numpy()
     out = np.zeros((len(df), 12))
     for xi, wi in zip(x, w):
-        z = base + 0.30 * xi * (heavy - 2.5) / 2.5
-        z -= z.max(axis=1, keepdims=True)
-        e = np.exp(z)
+        e = np.exp(_alignment_logits(p_run_logit, bias, xi))
         out += wi * e / e.sum(axis=1, keepdims=True)
     return out
+
+
+def _alignment_logits(p_run_logit: np.ndarray, heavy_bias: np.ndarray, read) -> np.ndarray:
+    """The coordinator's logits over the 12 alignments, (n, 12), max-subtracted:
+    peaked at the heaviness the run threat calls for, shifted by his defense's
+    lean and by the read (per snap, or one value for every snap).
+    `generate_synthetic_alignment` draws from their softmax;
+    `true_alignment_propensity` averages it over the read."""
+    heavy = alignment_heaviness(np.arange(12))[None, :]
+    ideal = 5.0 * _sigmoid(p_run_logit)
+    z = (-0.6 * (heavy - ideal[:, None] - heavy_bias[:, None]) ** 2
+         + 0.30 * np.asarray(read)[..., None] * (heavy - 2.5) / 2.5)
+    return z - z.max(axis=1, keepdims=True)
 
 
 def true_alignment_value(df: pd.DataFrame, actions: np.ndarray) -> float:

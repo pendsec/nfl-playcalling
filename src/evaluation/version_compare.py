@@ -14,6 +14,7 @@ Two things make the comparison honest:
     standard error of the paired difference is much smaller than what you would
     get by differencing two independent CIs — a real regression is detectable
     even though each policy's own CI is wide on this sparse single-team data.
+    It is clustered by game: plays in one game are not independent draws.
 
   * **An explicit non-inferiority margin, not a point comparison.** With noisy
     holdout data the new policy will essentially never tie exactly. The gate asks
@@ -52,6 +53,7 @@ class VersionComparison:
     diff_se: float            # standard error of the paired difference
     margin: float             # non-inferiority margin used by the gate
     n: int
+    n_games: int              # clusters behind diff_se
 
     @property
     def diff_ci95(self) -> tuple[float, float]:
@@ -93,6 +95,7 @@ class VersionComparison:
             "diff_ci_hi": hi,
             "margin": self.margin,
             "n": self.n,
+            "n_games": self.n_games,
             "verdict": self.verdict,
             "blocks_merge": self.regressed,
             "graph_version": self.candidate.graph_version,
@@ -107,7 +110,7 @@ class VersionComparison:
             f"  V_DR({self.baseline_name:<{w}}) = {self.baseline.value:+.4f}\n"
             f"  V_DR({self.candidate_name:<{w}}) = {self.candidate.value:+.4f}\n"
             f"  paired difference     = {self.diff:+.4f}  "
-            f"95% CI [{lo:+.4f}, {hi:+.4f}]  (n={self.n})\n"
+            f"95% CI [{lo:+.4f}, {hi:+.4f}]  (n={self.n}, {self.n_games} games)\n"
             f"  non-inferiority margin= {self.margin:.4f}\n"
             f"  verdict: {self.verdict}  ->  {gate}"
         )
@@ -145,7 +148,7 @@ def compare_policies(
         df[ds.action_col].to_numpy(), df[ds.reward_col].to_numpy(),
         baseline_probs, candidate_probs, weight_clip=weight_clip, margin=margin,
         baseline_name=baseline_name, candidate_name=candidate_name,
-        graph_version=graph_version)
+        graph_version=graph_version, clusters=df["game_id"].to_numpy())
 
 
 def compare_policy_arrays(
@@ -161,10 +164,15 @@ def compare_policy_arrays(
     candidate_name: str = "candidate",
     *,
     graph_version: str,
+    clusters: np.ndarray,
 ) -> VersionComparison:
     """`compare_policies` on precomputed nuisances — for action spaces no single
     fitted model spans, such as the factored alignment x coverage space, whose
-    Q and propensities are assembled from the two levels' models."""
+    Q and propensities are assembled from the two levels' models.
+
+    `clusters` is each row's game: snaps in one game share an opponent, a game
+    plan and a score state, so the paired difference's SE is game-clustered —
+    the same SE every other lift in the pipeline reports."""
     base_scores = dr_per_play(q_all, pi_b, baseline_probs, actions, rewards,
                               weight_clip=weight_clip)
     cand_scores = dr_per_play(q_all, pi_b, candidate_probs, actions, rewards,
@@ -172,7 +180,7 @@ def compare_policy_arrays(
 
     # Paired difference: same play, same Q, same propensities on both sides, so
     # the shared estimation noise cancels instead of adding.
-    diff, diff_se = mean_se(cand_scores - base_scores)
+    diff, diff_se = mean_se(cand_scores - base_scores, clusters)
 
     return VersionComparison(
         baseline_name=baseline_name,
@@ -185,6 +193,7 @@ def compare_policy_arrays(
         diff_se=diff_se,
         margin=margin,
         n=len(base_scores),
+        n_games=len(np.unique(clusters)),
     )
 
 

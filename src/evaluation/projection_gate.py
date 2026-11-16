@@ -107,5 +107,5 @@ def projection_gate(pbp: pd.DataFrame, cfg: dict, test2: pd.DataFrame, factored:
         weight_clip=cfg["ope"].get("weight_clip", 20.0),
         margin=cfg["evaluation"].get("regression_margin", 0.02),
         baseline_name="v2_coverage", candidate_name="v3_factored",
-        graph_version=graph_version,
+        graph_version=graph_version, clusters=hit["game_id"].to_numpy(),
     )

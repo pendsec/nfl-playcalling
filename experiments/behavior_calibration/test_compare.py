@@ -6,32 +6,24 @@ judges, and the scoring. Run with `pytest experiments`.
 from __future__ import annotations
 
 import copy
-import os
-import sys
 
 import numpy as np
 import pytest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 from _config import CFG_L1
 from experiments.behavior_calibration.compare import (CANDIDATES, candidate_config,
                                                       fit_factored, scored_crossfit,
                                                       score_candidate)
-from src.data.features import build_dataset, time_aware_split
-from src.data.load import generate_synthetic_alignment, true_alignment_propensity
+from src.data.load import true_alignment_propensity
 from src.ope.ipw import ipw_per_play
 
 
 @pytest.fixture(scope="module")
-def league():
+def league(synthetic_league):
     cfg = copy.deepcopy(CFG_L1)
     cfg["behavior_model"]["n_estimators"] = 60
-    pbp = generate_synthetic_alignment(9000, seed=3, conf_strength=0.0,
-                                       seasons=cfg["data"]["seasons"])
-    train, test = time_aware_split(build_dataset(pbp, cfg), cfg["data"]["holdout_season"])
+    train, test = synthetic_league(9000, seed=3)
     return cfg, train, test
 
 
@@ -87,3 +79,12 @@ def test_ipw_is_self_normalized():
     assert ipw_per_play(pi, np.tile(np.eye(4)[1], (500, 1)), a, r, 20.0,
                         self_normalize=True).mean() == \
         pytest.approx(1.0)
+
+
+def test_pooled_judge_accepts_a_state_that_already_has_the_season(league):
+    """The season joins the state once, even when the state carries it already."""
+    cfg, train, test = league
+    with_season = train.numeric_state + ["season"]
+    p = scored_crossfit(test.replace(numeric_state=with_season), cfg, n_folds=3,
+                        train=train.replace(numeric_state=with_season))
+    assert p.shape == (len(test.df), 12) and np.isfinite(p).all()

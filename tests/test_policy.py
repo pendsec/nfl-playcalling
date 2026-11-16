@@ -9,13 +9,9 @@ requires a REGRESSION verdict.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.scm import graph as scm
 from _config import CFG, WEIGHT_CLIP
@@ -106,3 +102,21 @@ def test_regression_gate_catches_a_deliberately_bad_policy(fitted):
     assert cmp.regressed
     assert cmp.verdict == "REGRESSION"
     assert cmp.to_record()["blocks_merge"] is True
+
+
+def test_gate_se_is_clustered_by_game(fitted):
+    """Snaps in one game are not independent draws: the gate's paired SE is the
+    game-clustered one, as for every other lift."""
+    from src.ope.doubly_robust import dr_per_play
+    from src.stats import mean_se
+    test, q, beh, policy = (fitted[k] for k in ("test", "q", "beh", "policy"))
+    df = test.df
+    base = learn_greedy_policy(test, q, beh, CFG).act(df)["policy_probs"]
+    cand = policy.act(df)["policy_probs"]
+    cmp = compare_policies(test, q, beh, base, cand, weight_clip=WEIGHT_CLIP, graph_version=GV)
+    q_all, pi_b = q.predict_all_actions(df), beh.propensity(df)
+    a, r = df[test.action_col].to_numpy(), df[test.reward_col].to_numpy()
+    diff = (dr_per_play(q_all, pi_b, cand, a, r, WEIGHT_CLIP)
+            - dr_per_play(q_all, pi_b, base, a, r, WEIGHT_CLIP))
+    assert (cmp.diff, cmp.diff_se) == mean_se(diff, df["game_id"].to_numpy())
+    assert cmp.diff_se != mean_se(diff)[1]

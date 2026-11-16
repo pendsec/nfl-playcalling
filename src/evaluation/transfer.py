@@ -31,23 +31,14 @@ import numpy as np
 import pandas as pd
 
 from ..models.behavior.propensity import fit_behavior_model
-from ..models.outcome.q_model import fit_q_ensemble, fit_q_model
+from ..models.outcome.q_model import fit_q_model
 from ..ope.doubly_robust import dr_per_play
-from ..policy.safe import learn_policy
+from ..policy.safe import defer_to, fit_policy
 from ..folds import game_folds
 from ..schemas.dataset import Dataset
 from ..stats import heterogeneity, mean_se, regresses
 
 SPLITS = {"leave_one_team_out": "defteam", "leave_one_season_out": "season"}
-
-
-def fit_policy(ds: Dataset, cfg: dict, beh=None, q=None):
-    """The configured policy, end to end, from `ds` alone."""
-    beh = beh if beh is not None else fit_behavior_model(ds, cfg, diagnose=False)[0]
-    q = q if q is not None else fit_q_model(ds, cfg)
-    safe = cfg["policy"].get("type", "conservative") == "safe"
-    ensemble = fit_q_ensemble(ds, cfg) if safe else None
-    return learn_policy(ds, q, beh, cfg, ensemble=ensemble)
 
 
 def crossfit_nuisances(ds: Dataset, cfg: dict, n_folds: int | None = None,
@@ -73,7 +64,7 @@ def crossfit_nuisances(ds: Dataset, cfg: dict, n_folds: int | None = None,
         test_df = ds.df[te]
         q_all[te], pi_b[te] = q.predict_all_actions(test_df), beh.propensity(test_df)
         if with_policy:
-            out = fit_policy(train, cfg, beh, q).act(test_df)
+            out = fit_policy(train, cfg, beh, q).policy.act(test_df)
             probs[te] = out["policy_probs"]
             departs[te] = ~out["deferred"] if "deferred" in out else True
         if progress:
@@ -101,7 +92,7 @@ def transfer_evaluation(ds: Dataset, cfg: dict, nuisances: dict,
         col = SPLITS[split]
         for g in sorted(df[col].unique()):
             held = (df[col] == g).to_numpy()
-            out = fit_policy(ds.subset(~held), cfg).act(df[held])
+            out = fit_policy(ds.subset(~held), cfg).policy.act(df[held])
             q, pb, aa, rr = nuisances["q_all"][held], nuisances["pi_b"][held], a[held], r[held]
             base = dr_per_play(q, pb, pb, aa, rr, clip)
             moved = dr_per_play(q, pb, out["policy_probs"], aa, rr, clip)
@@ -110,7 +101,7 @@ def transfer_evaluation(ds: Dataset, cfg: dict, nuisances: dict,
             # The same departures, deferring to the group's own mix rather than
             # the fold's estimate of it: separates "the departures do not
             # transfer" from "the coordinator's mix is not known".
-            anchored = np.where(departs[:, None], out["policy_probs"], pb)
+            anchored = defer_to(out, pb)
             anch = dr_per_play(q, pb, anchored, aa, rr, clip)
             lift, lift_se = mean_se(moved - base, games[held])
             lift_a, lift_a_se = mean_se(anch - base, games[held])

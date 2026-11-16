@@ -9,15 +9,11 @@ to occur only on 3rd/4th-and-short (a deliberate positivity hole).
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pandas as pd
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.scm import graph as scm
 from src.scm import identify
@@ -151,3 +147,35 @@ def test_ftn_coverage_guard_rejects_a_pre_2022_season():
     assert_ftn_coverage(df[df.season == 2023], cfg)
     # ...and be a no-op when FTN is switched off entirely.
     assert_ftn_coverage(df, {"data": {"use_ftn": False, "holdout_season": 2023}})
+
+
+# ── One slice filter, one label, one generator ───────────────────────────────
+def _sha(arr: np.ndarray) -> str:
+    import hashlib
+    return hashlib.sha256(np.ascontiguousarray(arr).tobytes()).hexdigest()[:16]
+
+
+def test_synthetic_alignment_league_and_its_truth_are_pinned():
+    """Every synthetic assertion rests on these exact draws: the generator and
+    its truth oracle share the coordinator's logits, and a refactor of either
+    must leave both bit for bit as they were."""
+    from src.data.load import generate_synthetic_alignment, true_alignment_propensity
+    df = generate_synthetic_alignment(3000, seed=11, seasons=[2022, 2023, 2024, 2025])
+    assert _sha(pd.util.hash_pandas_object(df, index=True).to_numpy()) == "5b17675e1a2b435e"
+    assert _sha(true_alignment_propensity(df)) == "e20a0fc88994ac50"
+
+
+def test_slice_report_counts_the_slice_build_dataset_keeps():
+    """The report filters with the dataset's own slice mask, `data.down` included."""
+    from src.data.features import slice_report
+    pbp = generate_synthetic(9000, seed=7)
+    cfg = {**CFG, "data": {**CFG["data"], "down": 3, "play_types": ["pass"]}}
+    rep = slice_report(pbp, cfg).set_index("play_type")
+    assert rep.loc["pass", "n_plays"] == ((pbp["play_type"] == "pass") & (pbp["down"] == 3)).sum()
+    assert rep.loc["pass", "n_usable"] == len(build_dataset(pbp, cfg).df)
+
+
+def test_build_dataset_refuses_the_level2_scheme():
+    cfg = {**CFG, "action": {**CFG["action"], "scheme": "level2"}}
+    with pytest.raises(ValueError, match="build_level2_dataset"):
+        build_dataset(generate_synthetic(500, seed=7), cfg)

@@ -7,15 +7,10 @@ from __future__ import annotations
 
 import copy
 import json
-import os
-import sys
 
 import numpy as np
 import pytest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 pytest.importorskip("torch")
 
@@ -23,8 +18,6 @@ from _config import CFG_L1
 from experiments.dragonnet_tuning.tune import (DEFAULT, SPACE, build_context, neural_config,
                                                run_config, sample_configs, score,
                                                selector_check, tuning_fold)
-from src.data.features import build_dataset, time_aware_split
-from src.data.load import generate_synthetic_alignment
 
 
 def test_the_search_starts_from_the_shipped_default():
@@ -57,12 +50,10 @@ def test_neural_config_pins_the_factored_dragonnet():
 
 
 @pytest.fixture(scope="module")
-def ctx():
+def ctx(synthetic_league):
     cfg = copy.deepcopy(CFG_L1)
     cfg["invariance"] = {**cfg.get("invariance", {}), "crossfit_folds": 2}
-    pbp = generate_synthetic_alignment(9000, seed=3, conf_strength=0.0,
-                                       seasons=cfg["data"]["seasons"])
-    train, _ = time_aware_split(build_dataset(pbp, cfg), cfg["data"]["holdout_season"])
+    train, _ = synthetic_league(9000, seed=3)
     fit, scored, q_true = tuning_fold(train, "synthetic")
     assert set(fit.df["season"]) == {2022, 2023} and set(scored.df["season"]) == {2024}
     return build_context(fit, scored, cfg, q_true)

@@ -11,15 +11,11 @@ the behavior policy's value, and the sensitivity band brackets the true value.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pandas as pd
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _config import CFG, CFG_L1, WEIGHT_CLIP
 from src.data.features import (LEVEL1_LABELS, TEAM_STATE, _qb_on_field,
@@ -361,12 +357,8 @@ def test_package_only_call_keeps_the_same_snaps(fitted_l1):
     """Dropping the box changes the treatment, not the sample: same rows, and
     each row's package matches the 12-alignment label's package."""
     from src.data.features import action_feature_matrix, level1_labels
-    from src.data.load import generate_synthetic_alignment
-    from _config import L1_SEED, N_L1_PLAYS
     cfg = _with_axes(["package"])
-    pbp = generate_synthetic_alignment(N_L1_PLAYS, seed=L1_SEED,
-                                       seasons=cfg["data"]["seasons"], conf_strength=0.20)
-    ds = build_dataset(pbp, cfg)
+    ds = build_dataset(fitted_l1["pbp"], cfg)
     full = fitted_l1["ds"].df
     assert ds.n_actions == 3
     assert level1_labels(cfg) == {0: "base", 1: "nickel", 2: "dime_plus"}

@@ -9,21 +9,16 @@ call, so recovered advantages can be checked against the truth.
 from __future__ import annotations
 
 import copy
-import os
-import sys
 
 import numpy as np
 import pandas as pd
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 pytest.importorskip("torch")
 
 from _config import CFG_L1
-from src.data.features import build_dataset, time_aware_split
-from src.data.load import generate_synthetic_alignment, true_alignment_q, true_alignment_value
+from src.data.load import true_alignment_q, true_alignment_value
 from src.models.behavior.propensity import fit_behavior_model
 from src.models.outcome.q_model import fit_q_ensemble, fit_q_model
 
@@ -41,11 +36,8 @@ def _advantages(q, pi):
 
 
 @pytest.fixture(scope="module")
-def league():
-    pbp = generate_synthetic_alignment(12000, seed=3, conf_strength=0.0,
-                                       seasons=CFG_L1["data"]["seasons"])
-    ds = build_dataset(pbp, CFG_L1)
-    train, test = time_aware_split(ds, CFG_L1["data"]["holdout_season"])
+def league(synthetic_league):
+    train, test = synthetic_league(12000, seed=3)
     pi_b = fit_behavior_model(train, CFG_L1, diagnose=False)[0].propensity(test.df)
     return dict(train=train, test=test, q_true=true_alignment_q(test.df), pi_b=pi_b)
 
@@ -205,3 +197,11 @@ def test_snap_batches_match_the_dataloader_stream():
     for _ in range(4):
         for (a1, b1), (a2, b2) in zip(dl, sb, strict=True):
             assert torch.equal(a1, a2) and torch.equal(b1, b2)
+
+
+def test_a_net_that_never_validates_fails_clearly(league):
+    """No epoch with a finite validation loss leaves no best state to restore:
+    say so, rather than crash inside `load_state_dict(None)`."""
+    cfg = _cfg(type="dragonnet", neural={**FAST_NET, "max_epochs": 0})
+    with pytest.raises(ValueError, match="never reached a finite validation loss"):
+        fit_q_model(league["train"], cfg)

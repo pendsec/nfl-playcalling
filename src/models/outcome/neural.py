@@ -321,6 +321,11 @@ def fit_neural_q_model(ds: Dataset, cfg: dict) -> NeuralQModel:
             stale += 1
             if stale >= ncfg.get("patience", 5):
                 break
+    if best_state is None:
+        last = history[-1]["val_loss"] if history else None
+        raise ValueError(f"the {kind} never reached a finite validation loss "
+                         f"(max_epochs={ncfg.get('max_epochs', 60)}, last val_loss={last}); "
+                         "check the data for NaNs and the learning rate")
     net.load_state_dict(best_state)
 
     model = NeuralQModel(net=net, encoder=enc, y_mean=y_mean, y_std=y_std,

@@ -8,14 +8,10 @@ mean reward first.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.scm import graph as scm
 from _config import WEIGHT_CLIP
@@ -186,3 +182,19 @@ def test_aipw_reports_support_behind_each_contrast(fitted):
     for _, row in contrasts.iterrows():
         label_to_id = {v: k for k, v in test.action_labels.items()}
         assert row["n_taken"] == int((a == label_to_id[row["action"]]).sum())
+
+
+def test_sensitivity_without_any_weight_is_the_dm_value_at_every_gamma():
+    """A policy that never plays a logged call leaves no correction to bound:
+    the band is DM's value, not NaN, whatever Gamma."""
+    rng = np.random.default_rng(0)
+    n, k = 200, 4
+    q_all = rng.normal(size=(n, k))
+    pi_b = rng.dirichlet(np.ones(k), n)
+    actions = np.zeros(n, int)                      # every snap logged call 0
+    probs = np.eye(k)[np.full(n, 2)]                # the policy always plays 2
+    rewards = rng.normal(size=n)
+    sens = sensitivity_bounds(q_all, pi_b, probs, actions, rewards, [1.0, 1.5, 3.0], WEIGHT_CLIP)
+    dm = float(q_all[:, 2].mean())
+    assert np.allclose(sens["v_lower"], dm) and np.allclose(sens["v_upper"], dm)
+    assert (sens["width"] == 0).all()

@@ -12,13 +12,9 @@ not mutate them. Tests that need a variant build their own from `CFG`.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _config import CFG, N_SYNTHETIC_PLAYS, SYNTHETIC_SEED
 from src.data.load import generate_synthetic
@@ -54,7 +50,7 @@ def _fit_level1(conf_strength: float) -> dict:
     beh, diag = fit_behavior_model(train, CFG_L1)
     q = fit_q_model(train, CFG_L1)
     policy = learn_conservative_policy(train, q, beh, CFG_L1)
-    return dict(ds=ds, train=train, test=test, beh=beh, q=q, diag=diag, policy=policy)
+    return dict(pbp=pbp, ds=ds, train=train, test=test, beh=beh, q=q, diag=diag, policy=policy)
 
 
 @pytest.fixture(scope="session")

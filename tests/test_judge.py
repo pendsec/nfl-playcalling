@@ -9,8 +9,6 @@ import pandas as pd
 import pytest
 
 from _config import CFG_L1
-from src.data.features import build_dataset, time_aware_split
-from src.data.load import generate_synthetic_alignment
 from src.models.behavior.judge import CrossFitJudge, fit_judge_behavior, judge_mode
 from src.models.behavior.propensity import fit_behavior_model
 from src.schemas.dataset import Dataset
@@ -24,10 +22,8 @@ def _cfg(judge="pooled_crossfit", folds=3):
 
 
 @pytest.fixture(scope="module")
-def league():
-    pbp = generate_synthetic_alignment(9000, seed=5, conf_strength=0.0,
-                                       seasons=CFG_L1["data"]["seasons"])
-    return time_aware_split(build_dataset(pbp, CFG_L1), CFG_L1["data"]["holdout_season"])
+def league(synthetic_league):
+    return synthetic_league(9000, seed=5)
 
 
 def _drifted(train: Dataset, call: int, keep: float, seed: int = 0) -> Dataset:

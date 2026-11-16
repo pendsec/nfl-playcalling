@@ -82,9 +82,12 @@ def sensitivity_bounds(
 
     rows = []
     for gamma in gamma_range:
-        if gamma <= 1.0:
-            corr = float(np.average(g, weights=w)) if w.sum() > 0 else 0.0
-            lo = hi = dm_mean + corr
+        if w.sum() == 0:
+            # No snap took a call the policy plays: there is no correction term
+            # for a confounder to tilt, at any Gamma, and the value is DM's.
+            lo = hi = dm_mean
+        elif gamma <= 1.0:
+            lo = hi = dm_mean + float(np.average(g, weights=w))
         else:
             lo = dm_mean + _msm_correction_bound(g, w, gamma, want_max=False)
             hi = dm_mean + _msm_correction_bound(g, w, gamma, want_max=True)

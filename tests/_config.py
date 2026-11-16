@@ -7,12 +7,6 @@ that only needs the config should not have to take a fixture to reach it.
 
 from __future__ import annotations
 
-import os
-import sys
-
-# Repo root, so `from src...` resolves however pytest was invoked.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 # Light config so the calibrated-GBM fits stay fast in CI. Deliberately mirrors
 # the shape of configs/v2.yaml rather than loading it: the tests assert against a
 # known SCM, and should not start failing because a real-data config was retuned.

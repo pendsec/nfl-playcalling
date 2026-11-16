@@ -37,6 +37,7 @@ from ..ope.doubly_robust import dr_per_play
 from ..schemas.behavior import BehaviorModel
 from ..schemas.dataset import Dataset
 from ..stats import mean_se
+from .safe import defer_to
 
 
 def alignment_frames(df: pd.DataFrame, cfg: dict) -> list[pd.DataFrame]:
@@ -81,13 +82,10 @@ def factor(p1: np.ndarray, p2: np.ndarray) -> np.ndarray:
 def level1_on_dropbacks(policy1, beh1_db: BehaviorModel, df: pd.DataFrame) -> dict:
     """The level-1 policy on dropback rows, deferring to P(a1 | s, dropback)."""
     out = policy1.act(df)
-    p_db = beh1_db.propensity(df)
     deferred = out.get("deferred")
-    if deferred is None:            # a policy that never defers
-        return {"probs": out["policy_probs"], "deferred": np.zeros(len(df), bool),
-                "chosen": out["chosen"]}
-    probs = np.where(deferred[:, None], p_db, out["policy_probs"])
-    return {"probs": probs, "deferred": deferred, "chosen": out["chosen"]}
+    return {"probs": defer_to(out, beh1_db.propensity(df)),
+            "deferred": np.zeros(len(df), bool) if deferred is None else deferred,
+            "chosen": out["chosen"]}
 
 
 def level2_under_each_alignment(policy2, df: pd.DataFrame, cfg: dict) -> dict:
@@ -143,11 +141,12 @@ def evaluate_factored(df: pd.DataFrame, cfg: dict, policy1, policy2, beh1_db: Be
         "both levels": factor(lvl1["probs"], lvl2["policy"]),
     }
     base = dr_per_play(q_joint, pi_b, pi_b, actions, rewards, weight_clip)
+    games = df["game_id"].to_numpy()
     rows = []
     for name, probs in policies.items():
         score = dr_per_play(q_joint, pi_b, probs, actions, rewards, weight_clip)
         value, se = mean_se(score)
-        lift, lift_se = mean_se(score - base)
+        lift, lift_se = mean_se(score - base, games)        # paired, games clustered
         rows.append({"policy": name, "value": value, "se": se, "lift": lift,
                      "lift_se": lift_se})
     logged = df["l1_action"].to_numpy()

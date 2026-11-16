@@ -9,14 +9,10 @@ variable makes unfalsifiable.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.scm import graph as scm
 from src.scm.ci_tests import (check_graph, ci_test, effective_parents,

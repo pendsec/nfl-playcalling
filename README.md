@@ -232,6 +232,7 @@ see [What the estimand actually is](#what-the-estimand-actually-is) below.
 | OPE | `src/ope/` | **doubly-robust** policy value (self-normalized, switch-clipped) + DR recovery smoke test; AIPW contrasts (same clipping, reported with support counts); Rosenbaum sensitivity |
 | Policy | `src/policy/` | conservative behavior-regularized (CQL/IQL-style) policy; safe improvement over the coordinator, alignment then coverage, scored as one factored policy (every-snap pipeline) |
 | Eval | `src/evaluation/` | policy regression gate: paired DR comparison of the candidate against the baseline policy on the held-out season; projection gate between the one-defense and every-snap pipelines |
+| Stages | `src/pipeline.py` | the every-snap pipeline's evaluation stages — holdout OPE, level 2 with the factored policy, invariance — shared by `run.py` (which prints and saves them) and the walkthrough notebook (which plots them) |
 
 **Built but not wired in:** `src/models/imputation/` treats the coverage shell as
 a *latent* treatment label — charted on ~94% of dropbacks but ~3% of runs — and
@@ -341,7 +342,8 @@ The two levels are scored together per charted dropback
 (`src/policy/hierarchical.py`), and the whole is gated against the one-defense
 coverage pipeline by projecting both into alignment × coverage on that defense's
 held-out dropbacks (`src/evaluation/projection_gate.py`): no regression, on a
-sample too small to show a difference under about ±0.16 per dropback.
+sample too small to show a difference under about ±0.12 per dropback — and with
+19 games behind it, even that interval may be too narrow.
 
 Last, whether any of it holds beyond the defenses and seasons it was learned on —
 inside 2022–24, so the held-out season stays untouched
@@ -437,7 +439,8 @@ convention:
   scores the greedy baseline and the conservative candidate by DR on the *same*
   held-out plays, so the difference is **paired** — the shared Q/πb noise
   cancels instead of adding, which matters because each policy's own CI is far
-  wider than the gap between them. The gate blocks only on a *significant
+  wider than the gap between them. Its standard error is clustered by game, since
+  plays in one game are not independent draws. The gate blocks only on a *significant
   deterioration* beyond a configured non-inferiority margin
   (`evaluation.regression_margin`); failing to prove an improvement is an
   acceptable outcome on this data, and `run.py` exits non-zero on a regression.

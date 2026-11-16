@@ -25,9 +25,9 @@ from __future__ import annotations
 
 import numpy as np
 from lightgbm import LGBMRegressor
-from sklearn.model_selection import KFold
 
 from ..preprocess import build_gbm_preprocessor
+from ...folds import game_folds
 from ...scm import graph as scm
 from ...schemas.dataset import Dataset
 from ...schemas.outcome import QModel
@@ -146,7 +146,7 @@ def crossfit_q(ds: Dataset, cfg: dict) -> np.ndarray:
     """Out-of-fold Q(s, a) for every training row — honest in-sample mu_hat.
 
     For each fold, per-action regressors are fit on the other folds and used to
-    score the held-out fold. Returns shape (n, n_actions).
+    score the held-out fold; folds hold whole games. Returns shape (n, n_actions).
     """
     _check_conditions_on_adjustment_set(ds, cfg)
     if _model_type(cfg) != "lightgbm":
@@ -162,8 +162,7 @@ def crossfit_q(ds: Dataset, cfg: dict) -> np.ndarray:
     global_mean = float(y.mean())
 
     mu = np.empty((len(y), ds.n_actions))
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=cfg["seed"])
-    for tr, va in kf.split(phi):
+    for tr, va in _game_splits(ds, n_splits, cfg["seed"]):
         for a in range(ds.n_actions):
             m = tr[T[tr] == a]
             if len(m) >= min_cell:
@@ -252,12 +251,18 @@ def fit_pooled_q_model(ds: Dataset, cfg: dict):
     return model
 
 
+def _game_splits(ds: Dataset, n_folds: int, seed: int) -> list[tuple[np.ndarray, np.ndarray]]:
+    """(train, held-out) row positions per fold, whole games together: a snap's
+    out-of-fold Q must come from a model that never saw its game, whose other
+    snaps share its opponent, game plan and score state."""
+    fold = game_folds(ds.df, n_folds, seed)
+    return [(np.flatnonzero(fold != k), np.flatnonzero(fold == k)) for k in range(n_folds)]
+
+
 def _crossfit_generic(ds: Dataset, cfg: dict) -> np.ndarray:
     """Out-of-fold Q for any model `fit_q_model` builds: refit per fold."""
     mu = np.empty((len(ds.df), ds.n_actions))
-    kf = KFold(n_splits=cfg["outcome_model"].get("cross_fit_folds", 5),
-               shuffle=True, random_state=cfg["seed"])
-    for tr, va in kf.split(ds.df):
+    for tr, va in _game_splits(ds, cfg["outcome_model"].get("cross_fit_folds", 5), cfg["seed"]):
         mu[va] = fit_q_model(ds.subset(tr), cfg).predict_all_actions(ds.df.iloc[va])
     return mu
 
@@ -271,9 +276,7 @@ def _crossfit_pooled(ds: Dataset, cfg: dict) -> np.ndarray:
     T = ds.df[ds.action_col].to_numpy()
     y = ds.df[ds.reward_col].to_numpy()
     mu = np.empty((len(y), ds.n_actions))
-    kf = KFold(n_splits=cfg["outcome_model"].get("cross_fit_folds", 5),
-               shuffle=True, random_state=cfg["seed"])
-    for tr, va in kf.split(phi):
+    for tr, va in _game_splits(ds, cfg["outcome_model"].get("cross_fit_folds", 5), cfg["seed"]):
         reg = _make_regressor(cfg, pooled=True)
         reg.fit(_pooled_design(phi[tr], T[tr], feats), y[tr])
         for a in range(ds.n_actions):

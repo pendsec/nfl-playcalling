@@ -9,14 +9,10 @@ contribute an extreme constant to every state.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.models.behavior.propensity import _cv_splits
 from src.models.outcome.q_model import _shrunk_cell_mean
@@ -102,17 +98,13 @@ def test_thin_q_cells_shrink_toward_the_global_mean():
 import copy
 
 from _config import CFG_L1
-from src.data.features import build_dataset, time_aware_split
-from src.data.load import (alignment_heaviness, generate_synthetic_alignment,
-                           true_alignment_propensity)
+from src.data.load import alignment_heaviness, true_alignment_propensity
 from src.models.behavior.propensity import CALIBRATIONS, fit_behavior_model
 
 
 @pytest.fixture(scope="module")
-def l1_league():
-    pbp = generate_synthetic_alignment(9000, seed=3, conf_strength=0.0,
-                                       seasons=CFG_L1["data"]["seasons"])
-    return time_aware_split(build_dataset(pbp, CFG_L1), CFG_L1["data"]["holdout_season"])
+def l1_league(synthetic_league):
+    return synthetic_league(9000, seed=3)
 
 
 def _bcfg(**kw):
@@ -172,3 +164,15 @@ def test_true_propensity_matches_the_logged_calls(l1_league):
     assert np.abs(p.mean(0) - share).max() < 0.02
     heavy = (p * alignment_heaviness(np.arange(12))).sum(1)
     assert np.corrcoef(heavy, df["_p_run_logit"])[0, 1] > 0.5
+
+
+def test_q_cross_fit_holds_out_whole_games(l1_league):
+    """A snap's out-of-fold Q comes from a model that never saw its game."""
+    from src.models.outcome.q_model import _game_splits
+    train, _ = l1_league
+    games = train.df["game_id"].to_numpy()
+    splits = _game_splits(train, 5, seed=0)
+    held = np.concatenate([va for _, va in splits])
+    assert len(splits) == 5 and np.array_equal(np.sort(held), np.arange(len(games)))
+    for tr, va in splits:
+        assert not set(games[tr]) & set(games[va])

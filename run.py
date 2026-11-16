@@ -39,19 +39,12 @@ from src.data.load import (load_pbp, load_ftn, merge_ftn, ftn_coverage,
                            generate_synthetic_alignment,
                            generate_synthetic)
 from src.data.features import (action_scheme, assert_ftn_coverage, build_dataset,
-                               build_level2_dataset, level2_config,
                                slice_report, time_aware_split)
 from src.models.behavior.propensity import fit_behavior_model
-from src.models.behavior.judge import fit_judge_behavior, judge_mode
-from src.models.calibration import weight_balance
-from src.stats import mean_se
-from src.models.outcome.q_model import fit_q_model, crossfit_q, fit_q_ensemble
+from src.models.outcome.q_model import fit_q_model, crossfit_q
 from src.ope.direct_method import behavior_recovery_check
-from src.ope.doubly_robust import dr_per_play, dr_policy_value
-from src.ope.aipw import aipw_contrasts
-from src.ope.ladder import ope_ladder
-from src.ope.sensitivity import sensitivity_bounds, attach as attach_sensitivity
-from src.policy.safe import learn_policy
+from src.pipeline import holdout_ope, invariance_stage, level2
+from src.policy.safe import fit_policy, is_safe
 from src.evaluation import compare_to_baseline
 
 
@@ -169,7 +162,7 @@ def main(config_path: str, source_override: str | None, transfer: bool = False) 
     beh, diag = fit_behavior_model(train, cfg)
     cal = "isotonic-calibrated" if diag["calibrated"] else \
           f"UNCALIBRATED (rarest call has {diag['min_class_count']} play — too sparse to calibrate)"
-    src = f"{diag['n_splits']}-fold cross-fit" if diag["diagnostics_source"] == "oof" \
+    src = f"{diag['n_splits']}-fold cross-fit by game" if diag["diagnostics_source"] == "oof" \
           else "IN-SAMPLE — optimistic (no class admits a split)"
     print(f"  model: {cal}")
     if diag["n_excluded_rare"]:
@@ -207,15 +200,14 @@ def main(config_path: str, source_override: str | None, transfer: bool = False) 
 
     # ── 6. Policy + holdout evaluation ───────────────────────────────────────
     _rule("[6/10] Policy + DR evaluation on holdout")
-    ensemble = None
-    safe = cfg["policy"].get("type", "conservative") == "safe"
-    pname = "safe" if safe else "conservative"
+    safe = is_safe(cfg)
+    fit = fit_policy(train, cfg, beh=beh, q=q)
+    policy = fit.policy
     if safe:
-        ensemble = fit_q_ensemble(train, cfg)
-        print(f"  Q ensemble: {len(ensemble.members)} game-bootstrap refits; the policy "
+        print(f"  Q ensemble: {len(fit.ensemble.members)} game-bootstrap refits; the policy "
               f"keeps the DC's mix unless a call's advantage clears a "
               f"{cfg['policy']['lcb_kappa']:.2f}-sd lower bound")
-    policy = learn_policy(train, q, beh, cfg, ensemble=ensemble)
+    out_dir = cfg.get("output_dir", "outputs")
     if safe and getattr(policy, "read_bias", None) is not None:
         rb_table = policy.read_bias_table
         print(f"  read allowance (x{policy.allowance_scale:g}): bias of each component from "
@@ -223,42 +215,18 @@ def main(config_path: str, source_override: str | None, transfer: bool = False) 
         for _, row in rb_table.iterrows():
             print(f"    {row['component']:<10} excess run {row['excess_run']:+.3f}  "
                   f"x gap {row['run_minus_pass']:+.3f}  = {row['bias']:+.4f}/snap")
-        os.makedirs(cfg.get("output_dir", "outputs"), exist_ok=True)
-        rb_table.to_csv(os.path.join(cfg.get("output_dir", "outputs"), "read_bias.csv"), index=False)
-    out = policy.act(test.df)
-    a_te = test.df[ds.action_col].to_numpy()
-    r_te = test.df[ds.reward_col].to_numpy()
-    q_te = q.predict_all_actions(test.df)
-    # The judge's pi_b is not the policy's: the policy is fit on the training
-    # seasons and stays that way, the judge must know how the coordinator mixed
-    # his calls in the season it scores (`src/models/behavior/judge.py`).
-    judge = fit_judge_behavior(train, test, cfg, beh)
-    pib_te = judge.propensity(test.df)
-    judge_row = _report_judge(cfg, a_te, beh.propensity(test.df), pib_te,
-                              ds.action_labels, test.df["game_id"].to_numpy())
-
-    v_behavior = dr_policy_value(q_te, pib_te, pib_te, a_te, r_te, weight_clip,
-                                 policy_name="behavior", graph_version=gv)
-    v_policy = dr_policy_value(q_te, pib_te, out["policy_probs"], a_te, r_te, weight_clip,
-                               policy_name=pname, graph_version=gv)
-    print(f"  V_DR(pi_b) on holdout: {v_behavior.value:+.4f}  "
-          f"95% CI [{v_behavior.ci95[0]:+.4f}, {v_behavior.ci95[1]:+.4f}]")
-    print(f"  V_DR(pi*)  on holdout: {v_policy.value:+.4f}  "
-          f"95% CI [{v_policy.ci95[0]:+.4f}, {v_policy.ci95[1]:+.4f}]")
-    print(f"  estimated lift       : {v_policy.value - v_behavior.value:+.4f} reward/play")
-    if safe and judge is not beh:
-        # Deferring, the policy plays its own (train-fit) estimate of the mix,
-        # which the judge no longer shares — so the lift above also prices how
-        # stale that estimate is. Anchored: the same departures, deferring to
-        # the judge's mix, as a deployed policy would (it knows this season).
-        anchored = np.where(out["deferred"][:, None], pib_te, out["policy_probs"])
-        base = dr_per_play(q_te, pib_te, pib_te, a_te, r_te, weight_clip)
-        games = test.df["game_id"].to_numpy()
-        for tag, probs in (("as built", out["policy_probs"]), ("anchored", anchored)):
-            d, se = mean_se(dr_per_play(q_te, pib_te, probs, a_te, r_te,
-                                                  weight_clip) - base, games)
-            judge_row[f"lift_{tag.replace(' ', '_')}"], judge_row[f"lift_{tag.replace(' ', '_')}_se"] = d, se
-            print(f"    lift {tag:<9}: {d:+.4f} ± {1.96 * se:.4f} (paired, games clustered)")
+        os.makedirs(out_dir, exist_ok=True)
+        rb_table.to_csv(os.path.join(out_dir, "read_bias.csv"), index=False)
+    h = holdout_ope(train, test, cfg, fit, gv)
+    out, a_te, pib_te = h.out, h.actions, h.pi_b
+    _print_judge(cfg, h.report)
+    print(f"  V_DR(pi_b) on holdout: {h.v_behavior.value:+.4f}  "
+          f"95% CI [{h.v_behavior.ci95[0]:+.4f}, {h.v_behavior.ci95[1]:+.4f}]")
+    print(f"  V_DR(pi*)  on holdout: {h.v_policy.value:+.4f}  "
+          f"95% CI [{h.v_policy.ci95[0]:+.4f}, {h.v_policy.ci95[1]:+.4f}]")
+    print(f"  estimated lift       : {h.v_policy.value - h.v_behavior.value:+.4f} reward/play")
+    for tag, (d, se) in h.lifts.items():
+        print(f"    lift {tag:<9}: {d:+.4f} ± {1.96 * se:.4f} (paired, games clustered)")
     # Agreement rate alone is a poor read on conservatism: the DC plays a
     # stochastic mix whose modal call covers only ~26% of snaps, so a
     # deterministic argmax cannot agree much beyond that even when it is
@@ -281,14 +249,8 @@ def main(config_path: str, source_override: str | None, transfer: bool = False) 
 
     # The ladder: the same policy under every estimator. DM trusts Q, IPW trusts
     # pi_b, DR needs only one of them — agreement is the thing to look for.
-    ladder = pd.concat([
-        ope_ladder(q_te, pib_te, pib_te, a_te, r_te, weight_clip,
-                   policy_name="behavior", graph_version=gv),
-        ope_ladder(q_te, pib_te, out["policy_probs"], a_te, r_te, weight_clip,
-                   policy_name=pname, graph_version=gv),
-    ], ignore_index=True)
     print("\n  DM -> IPW -> DR ladder on holdout:")
-    for pol, grp in ladder.groupby("policy", sort=False):
+    for pol, grp in h.ladder.groupby("policy", sort=False):
         cells = "  ".join(f"{r.estimator} {r.value:+.4f}" for r in grp.itertuples())
         g0 = grp.iloc[0]
         print(f"    {pol:<13} {cells}")
@@ -296,126 +258,72 @@ def main(config_path: str, source_override: str | None, transfer: bool = False) 
               f"ESS {g0.ess_ratio:.1%}, {g0.share_clipped:.1%} clipped")
 
     print("\n  Sensitivity to unobserved confounding (does the lift survive?):")
-    sens = sensitivity_bounds(q_te, pib_te, out["policy_probs"], a_te, r_te,
-                              cfg["sensitivity"]["gamma_range"], weight_clip,
-                              compare_value=v_behavior.value,
-                              policy_name=pname)
-    # Bind the bound to the estimate it qualifies, so the saved record carries
-    # value + CI + sensitivity + graph version together (CLAUDE.md discipline).
-    attach_sensitivity(v_policy, sens)
-    for _, row in sens.iterrows():
+    for _, row in h.sensitivity.iterrows():
         flag = "robust" if row.get("beats_comparison") else "NOT robust"
         print(f"    gamma={row['gamma']:.1f}: V(pi*) in "
               f"[{row['v_lower']:+.4f}, {row['v_upper']:+.4f}]  -> {flag}")
 
-    # Same weight clip as DR: a fixed-action contrast rests entirely on the
-    # plays that took that action, so it is *more* exposed to a tiny
-    # propensity than a policy value is, not less.
-    by_label = {v: k for k, v in ds.action_labels.items()}
-    # Falls back to the most common call when the configured label is not in
-    # the action space (e.g. `nickel_box6` after the box is dropped from it).
-    modal = int(train.df[ds.action_col].mode()[0])
-    baseline = by_label.get(cfg["ope"].get("aipw_baseline"), modal)
-    contrasts = aipw_contrasts(q_te, pib_te, a_te, r_te, ds.action_labels,
-                               baseline=baseline, weight_clip=weight_clip)
-
     # ── 7. Policy regression gate ────────────────────────────────────────────
     _rule("[7/10] Regression gate — candidate policy vs baseline on the holdout season")
-    cmp = compare_to_baseline(test, q, beh, cfg, ensemble=ensemble, candidate=policy,
-                              judge=judge)
+    cmp = compare_to_baseline(test, q, beh, cfg, ensemble=fit.ensemble, candidate=policy,
+                              judge=h.judge)
     print(cmp.report())
 
-    level2 = None
+    l2 = None
     if every_snap and "level2" in cfg["action"]:
-        level2 = _level2(cfg, pbp, ds, policy, weight_clip)
+        l2 = _level2(cfg, pbp, ds, policy)
 
     if every_snap and "invariance" in cfg:
         _invariance(cfg, train, transfer or cfg["invariance"].get("run_transfer", False))
 
-    _example_recommendations(ds, test, policy, level2)
-    _save_outputs(cfg, ds, q_all_train, v_behavior, v_policy, sens, contrasts, cmp, ladder)
-    pd.DataFrame([judge_row]).to_csv(f"{cfg.get('output_dir', 'outputs')}/judge.csv", index=False)
+    _example_recommendations(ds, test, policy, l2)
+    _save_outputs(cfg, ds, q_all_train, h, cmp)
     if graph_checks is not None:
-        graph_checks.to_csv(f"{cfg.get('output_dir', 'outputs')}/graph_checks.csv", index=False)
+        graph_checks.to_csv(f"{out_dir}/graph_checks.csv", index=False)
 
-    gate_v2 = level2["gate"] if level2 else None
+    gate_v2 = l2.gate if l2 else None
     if cmp.regressed or (gate_v2 is not None and gate_v2.regressed):
         # CLAUDE.md: "Regressions block merge." Exit non-zero so CI fails.
         raise SystemExit(1)
 
 
-def _level2(cfg, pbp, ds1, policy1, weight_clip) -> dict:
+def _level2(cfg, pbp, ds1, policy1):
     """Stages 8-9: coverage given the alignment, the factored policy, the V2 gate."""
-    from src.policy.hierarchical import (dropback_alignment_dataset, evaluate_factored,
-                                         fit_dropback_alignment_behavior)
-
-    cfg2 = level2_config(cfg)
-    graph2 = scm.graph_for(cfg2)
-    gv2 = graph2.version_tag()
     out_dir = cfg.get("output_dir", "outputs")
     os.makedirs(out_dir, exist_ok=True)
 
     # ── 8. Level 2 ──────────────────────────────────────────────────────────
     _rule("[8/10] Level 2 — coverage x pressure given the alignment (charted dropbacks)")
-    ds2 = build_level2_dataset(ds1, cfg2)
-    train2, test2 = time_aware_split(ds2, cfg["data"]["holdout_season"])
+    l2 = level2(cfg, ds1, policy1, pbp)
+    ds2 = l2.ds
     print(f"  {len(ds2.df):,} charted dropbacks ({len(ds2.df) / len(ds1.df):.0%} of snaps), "
-          f"{ds2.n_actions} calls; train={len(train2.df):,} holdout={len(test2.df):,}")
+          f"{ds2.n_actions} calls; train={len(l2.train.df):,} holdout={len(l2.test.df):,}")
     shares = pd.crosstab(ds2.df["season"], ds2.df["action_label"], normalize="index")
     print("  share of each call by season:")
     print("    " + shares.round(3).to_string().replace("\n", "\n    "))
-    print(graph2.describe())
-    est2 = identify.identify_estimand(identify.build_causal_model(train2, graph=graph2))
-    bd2 = est2.get_backdoor_variables() if hasattr(est2, "get_backdoor_variables") else []
-    print(f"  DoWhy: backdoor-identified via {len(bd2)} adjustment variables "
+    print(l2.graph.describe())
+    print(f"  DoWhy: backdoor-identified via {l2.n_backdoor} adjustment variables "
           f"(the alignment among them)")
-
-    beh2, diag2 = fit_behavior_model(train2, cfg2)
+    diag2 = l2.diag
     print(f"  pi_b2: accuracy {diag2['oof_accuracy']:.3f} (majority "
           f"{diag2['majority_baseline']:.3f}), ESS {diag2['ess_ratio']:.3f}, "
           f"classwise ECE {diag2['classwise_ece']:.3f}")
-    a2 = test2.df["action"].to_numpy()
-    r2 = test2.df["reward"].to_numpy()
-    judge2 = fit_judge_behavior(train2, test2, cfg2, beh2)
-    pib2 = judge2.propensity(test2.df)
     # Coverage labels are where the charting drifts, so check the propensities
     # against the season they will weight before trusting them.
-    _report_judge(cfg2, a2, beh2.propensity(test2.df), pib2, ds2.action_labels,
-                  test2.df["game_id"].to_numpy(), indent="  ")
-
-    q2 = fit_q_model(train2, cfg2)
-    ens2 = fit_q_ensemble(train2, cfg2)
-    policy2 = learn_policy(train2, q2, beh2, cfg2, ensemble=ens2)
-    out2 = policy2.act(test2.df)
-    q2_te = out2["q_all"]
-    v_b2 = dr_policy_value(q2_te, pib2, pib2, a2, r2, weight_clip,
-                           policy_name="behavior_level2", graph_version=gv2)
-    v_p2 = dr_policy_value(q2_te, pib2, out2["policy_probs"], a2, r2, weight_clip,
-                           policy_name="safe_level2", graph_version=gv2)
-    dm_lift = float(((out2["policy_probs"] - pib2) * q2_te).sum(1).mean())
+    _print_judge(l2.cfg, l2.report)
+    out2 = l2.out
     dep2 = ~out2["deferred"]
     print(f"  at the coordinator's alignment, pi2 keeps his coverage mix on "
-          f"{1 - dep2.mean():.1%} of holdout dropbacks (bound {cfg2['policy']['lcb_kappa']:.2f} sd)")
+          f"{1 - dep2.mean():.1%} of holdout dropbacks (bound {l2.cfg['policy']['lcb_kappa']:.2f} sd)")
     for j, share in pd.Series(out2["chosen"][dep2]).value_counts(normalize=True).head(3).items():
         print(f"    departs to {ds2.action_labels[int(j)]:<22} {share:.0%} of departures")
-    print(f"  V_DR(pi_b2) {v_b2.value:+.4f}   V_DR(pi2) {v_p2.value:+.4f}   "
-          f"lift DR {v_p2.value - v_b2.value:+.4f} | DM {dm_lift:+.4f}")
-    sens2 = sensitivity_bounds(q2_te, pib2, out2["policy_probs"], a2, r2,
-                               cfg["sensitivity"]["gamma_range"], weight_clip,
-                               compare_value=v_b2.value, policy_name="safe_level2")
-    attach_sensitivity(v_p2, sens2)
+    print(f"  V_DR(pi_b2) {l2.v_behavior.value:+.4f}   V_DR(pi2) {l2.v_policy.value:+.4f}   "
+          f"lift DR {l2.v_policy.value - l2.v_behavior.value:+.4f} | DM {l2.dm_lift:+.4f}")
 
     # ── 9. The factored policy, and the V2 -> V3 gate ───────────────────────
     _rule("[9/10] Factored policy (alignment x coverage) + V2 -> V3 projection gate")
-    beh1_db, _ = fit_dropback_alignment_behavior(train2, cfg)
-    judges = None
-    if judge_mode(cfg) != "train":
-        judge1_db = fit_judge_behavior(dropback_alignment_dataset(train2, cfg),
-                                       dropback_alignment_dataset(test2, cfg), cfg, beh1_db)
-        judges = (judge1_db, judge2)
-    fac = evaluate_factored(test2.df, cfg, policy1, policy2, beh1_db, weight_clip,
-                            judges=judges)
-    print(f"  per charted dropback, play held a dropback (n={len(test2.df):,}); "
+    fac = l2.factored
+    print(f"  per charted dropback, play held a dropback (n={len(l2.test.df):,}); "
           f"level 1 departs on {fac['level1_departs']:.1%}, level 2 on "
           f"{fac['level2_departs']:.1%}")
     for r in fac["table"].itertuples():
@@ -423,25 +331,25 @@ def _level2(cfg, pbp, ds1, policy1, weight_clip) -> dict:
     print("  (level 1's departures earn their value against the run, which a "
           "per-dropback estimand cannot see)")
 
-    gate = None
     pg = cfg.get("evaluation", {}).get("projection_gate")
-    if pg and cfg["data"]["source"] != "synthetic":
-        from src.evaluation.projection_gate import projection_gate
-        gate = projection_gate(pbp, cfg, test2.df, fac, graph_version=gv2)
+    if l2.gate is not None:
         print(f"\n  V2 -> V3 on {pg['team']}'s {cfg['data']['holdout_season']} charted dropbacks "
               f"(V2 refit on the training seasons):")
-        print(gate.report())
-        pd.DataFrame([gate.to_record()]).to_csv(f"{out_dir}/projection_gate.csv", index=False)
+        print(l2.gate.report())
+        print(f"  (one defense's season, {l2.gate.n_games} games: the game-clustered SE may "
+              "understate the noise, which errs toward blocking, never toward passing)")
+        pd.DataFrame([l2.gate.to_record()]).to_csv(f"{out_dir}/projection_gate.csv", index=False)
     elif pg:
         print("  V2 -> V3 gate: skipped on synthetic data (V2 is a one-team pipeline)")
 
-    pd.DataFrame([v_b2.to_record(), v_p2.to_record()]).to_csv(
+    pd.DataFrame([l2.v_behavior.to_record(), l2.v_policy.to_record()]).to_csv(
         f"{out_dir}/level2_policy_values.csv", index=False)
-    sens2.to_csv(f"{out_dir}/level2_sensitivity.csv", index=False)
-    fac["table"].assign(graph_version=gv2).to_csv(f"{out_dir}/factored_policy.csv", index=False)
+    l2.sensitivity.to_csv(f"{out_dir}/level2_sensitivity.csv", index=False)
+    fac["table"].assign(graph_version=l2.graph.version_tag()).to_csv(
+        f"{out_dir}/factored_policy.csv", index=False)
     print(f"\n  saved: {out_dir}/{{level2_policy_values,level2_sensitivity,factored_policy"
-          f"{',projection_gate' if gate else ''}}}.csv")
-    return {"cfg2": cfg2, "ds2": ds2, "policy": policy2, "gate": gate}
+          f"{',projection_gate' if l2.gate else ''}}}.csv")
+    return l2
 
 
 # Named situations rather than random rows: the recommendations a coordinator
@@ -457,27 +365,16 @@ _SITUATIONS = [
 def _invariance(cfg, train, transfer: bool) -> None:
     """Stage 10: do the call's effects differ across team-seasons, and does the
     policy transfer to a defense or season it never saw? Training seasons only."""
-    from src.evaluation.invariance import (cluster_ids, environment_ids, invariance_test,
-                                           pooled_effects)
-    from src.evaluation.transfer import (crossfit_nuisances, summarize_transfer,
-                                         transfer_evaluation)
-
     _rule("[10/10] Invariance across team-seasons" + (" + transfer" if transfer else ""))
-    df = train.df
-    n_env = environment_ids(df, cfg).nunique()
-    print(f"  environments: {n_env} ({cfg['invariance'].get('environment', 'team_season')}), "
+    inv = invariance_stage(cfg, train, transfer)
+    print(f"  environments: {inv.n_env} ({cfg['invariance'].get('environment', 'team_season')}), "
           f"training seasons only; nuisances cross-fitted by game")
-    nu = crossfit_nuisances(train, cfg, with_policy=transfer)
-    a, r = df[train.action_col].to_numpy(), df[train.reward_col].to_numpy()
-    eff = pooled_effects(nu["q_all"], nu["pi_b"], a, r, df["game_id"].to_numpy(), cfg)
-    table, per_env, needed = invariance_test(nu["q_all"], nu["pi_b"], a, r,
-                                             environment_ids(df, cfg).to_numpy(),
-                                             cluster_ids(df), cfg, effects=eff)
     print("  component contrasts (DR over all environments; spread across them):")
-    for row in table.itertuples():
+    for row in inv.table.itertuples():
         print(f"    {row.contrast:<20} effect {row.effect:+.4f} ± {row.effect_se:.4f} | "
               f"Q varies it sd {row.modeled_sd:.4f} | unmodeled tau {row.unmodeled_tau:.4f} "
               f"(p {row.p:.3f}, phi {row.phi:.2f}, {row.n_env} env) -> {row.verdict}")
+    needed = inv.needed
     print(f"  invariance penalty {'NEEDED' if needed else 'not needed'}: "
           f"{'a contrast varies' if needed else 'no contrast'} beyond tau "
           f"{cfg['invariance'].get('min_tau', cfg['evaluation']['regression_margin']):.3f} "
@@ -485,30 +382,28 @@ def _invariance(cfg, train, transfer: bool) -> None:
 
     out_dir = cfg.get("output_dir", "outputs")
     os.makedirs(out_dir, exist_ok=True)
-    table.to_csv(f"{out_dir}/invariance.csv", index=False)
-    per_env.to_csv(f"{out_dir}/invariance_by_environment.csv", index=False)
+    inv.table.to_csv(f"{out_dir}/invariance.csv", index=False)
+    inv.per_env.to_csv(f"{out_dir}/invariance_by_environment.csv", index=False)
     saved = "invariance,invariance_by_environment"
     if transfer:
-        tr = transfer_evaluation(train, cfg, nu)
-        summary = summarize_transfer(tr)
         print("\n  transfer: the policy refit without the group, scored on it "
               "(lift over the coordinator; anchored = the same departures, deferring "
               "to the group's own mix; gap vs the in-domain policy)")
-        for row in summary.itertuples():
+        for row in inv.transfer_summary.itertuples():
             print(f"    {row.split:<22} {row.groups:>2} groups  departs {row.departs:.1%}  "
                   f"lift {row.lift:+.4f} ± {row.lift_se:.4f} (tau {row.lift_tau:.4f})  "
                   f"anchored {row.lift_anchored:+.4f} ± {row.lift_anchored_se:.4f}  "
                   f"gap {row.gap:+.4f} ± {row.gap_se:.4f}  "
                   f"regress {row.n_regress}  worst {row.worst} {row.worst_lift:+.4f}")
-        tr.to_csv(f"{out_dir}/transfer.csv", index=False)
-        summary.to_csv(f"{out_dir}/transfer_summary.csv", index=False)
+        inv.transfer.to_csv(f"{out_dir}/transfer.csv", index=False)
+        inv.transfer_summary.to_csv(f"{out_dir}/transfer_summary.csv", index=False)
         saved += ",transfer,transfer_summary"
     else:
         print("  transfer (leave one team / season out, ~1 hour): run with --transfer")
     print(f"\n  saved: {out_dir}/{{{saved}}}.csv")
 
 
-def _example_recommendations(ds, test, policy, level2=None) -> None:
+def _example_recommendations(ds, test, policy, l2=None) -> None:
     _rule("Example recommendations (holdout states)")
     for name, where in _SITUATIONS:
         pool = test.df[where(test.df)]
@@ -533,14 +428,14 @@ def _example_recommendations(ds, test, policy, level2=None) -> None:
             print(f"    -> recommend: {ds.action_labels[a]}  (Q={q_all[a]:+.3f})")
         print(f"       DC actually called: {ds.action_labels[int(s['action'])]}")
         print(f"       supported calls here ({len(supported)}): {', '.join(supported)}")
-        if level2 is not None:
+        if l2 is not None:
             # The coverage is called before the offense commits, so it is
             # recommended on every snap — for the alignment just recommended.
             from src.policy.hierarchical import alignment_frames
-            frame = alignment_frames(row, level2["cfg2"])[a]
-            r2 = level2["policy"].act(frame)
+            frame = alignment_frames(row, l2.cfg)[a]
+            r2 = l2.fit.policy.act(frame)
             c = int(r2["chosen"][0])
-            labels2 = level2["ds2"].action_labels
+            labels2 = l2.ds.action_labels
             if r2["deferred"][0]:
                 print(f"       coverage: keep the usual mix with it "
                       f"(most often {labels2[c]})")
@@ -549,48 +444,24 @@ def _example_recommendations(ds, test, policy, level2=None) -> None:
                       f"± {r2['q_sd'][0][c]:.3f})")
 
 
-def _report_judge(cfg, a, p_policy, p_judge, labels, games, indent="  ") -> dict:
-    """How far the policy's train-fit pi_b is from the judge's on the scored
-    season: log loss (paired, games clustered), the worst calibration-in-the-
-    large gap and the worst weight balance (1 = the weights average right) over
-    calls supported on at least 200 snaps."""
-    thr = cfg["policy"].get("support_threshold", 0.05)
-    k = p_policy.shape[1]
-    share = np.bincount(a, minlength=k) / len(a)
-    rows = np.arange(len(a))
-    row = {"judge": judge_mode(cfg), "n": len(a)}
-    for tag, p in (("train_fit", p_policy), ("judge", p_judge)):
-        ll = -np.log(np.clip(p[rows, a], 1e-12, 1.0))
-        citl = np.abs(p.mean(0) - share)
-        # Worst over calls supported on enough snaps to measure: a call almost
-        # never supported (dime/8+) reads 0 under any pi_b and says nothing.
-        wb = np.where((p >= thr).sum(0) >= 200, weight_balance(a, p, thr), np.nan)
-        worst = int(np.nanargmax(np.abs(wb - 1)))
-        row.update({f"{tag}_log_loss": float(ll.mean()), f"{tag}_citl_max": float(citl.max()),
-                    f"{tag}_citl_call": labels[int(citl.argmax())],
-                    f"{tag}_balance_worst": float(wb[worst]),
-                    f"{tag}_balance_call": labels[worst]})
-        row[f"_{tag}_rows"] = ll
+def _print_judge(cfg, row: dict, indent: str = "  ") -> None:
+    """The judge report (`pipeline.judge_report`) for the run log."""
     if row["judge"] == "train":
         print(f"{indent}judge's pi_b: the policy's own (train-fit) — holdout log loss "
               f"{row['train_fit_log_loss']:.3f}; largest calibration-in-the-large gap "
               f"{row['train_fit_citl_max']:.3f} ({row['train_fit_citl_call']})")
-    else:
-        d, se = mean_se(row["_judge_rows"] - row["_train_fit_rows"], games)
-        row["log_loss_diff"], row["log_loss_diff_se"] = d, se
-        print(f"{indent}judge's pi_b: training seasons + the holdout's other games, season in "
-              f"the state, {cfg['ope'].get('judge_folds', 5)} folds by game (calls, never rewards)")
-        for tag, name in (("train_fit", "train-fit (the policy's)"), ("judge", "judge")):
-            print(f"{indent}  {name:<25} log loss {row[f'{tag}_log_loss']:.4f} · largest "
-                  f"share gap {row[f'{tag}_citl_max']:.3f} ({row[f'{tag}_citl_call']}) · worst "
-                  f"weight balance {row[f'{tag}_balance_worst']:.2f} ({row[f'{tag}_balance_call']})")
-        print(f"{indent}  log loss, judge - train-fit: {d:+.4f} ± {1.96 * se:.4f}")
-    del row["_train_fit_rows"], row["_judge_rows"]
-    return row
+        return
+    print(f"{indent}judge's pi_b: training seasons + the holdout's other games, season in "
+          f"the state, {cfg['ope'].get('judge_folds', 5)} folds by game (calls, never rewards)")
+    for tag, name in (("train_fit", "train-fit (the policy's)"), ("judge", "judge")):
+        print(f"{indent}  {name:<25} log loss {row[f'{tag}_log_loss']:.4f} · largest "
+              f"share gap {row[f'{tag}_citl_max']:.3f} ({row[f'{tag}_citl_call']}) · worst "
+              f"weight balance {row[f'{tag}_balance_worst']:.2f} ({row[f'{tag}_balance_call']})")
+    print(f"{indent}  log loss, judge - train-fit: {row['log_loss_diff']:+.4f} "
+          f"± {1.96 * row['log_loss_diff_se']:.4f}")
 
 
-def _save_outputs(cfg, ds, q_all_train, v_behavior, v_policy, sens, contrasts,
-                  cmp, ladder) -> None:
+def _save_outputs(cfg, ds, q_all_train, h, cmp) -> None:
     out_dir = cfg.get("output_dir", "outputs")
     os.makedirs(out_dir, exist_ok=True)
     pd.DataFrame({
@@ -601,15 +472,16 @@ def _save_outputs(cfg, ds, q_all_train, v_behavior, v_policy, sens, contrasts,
     # graph version, and whether a sensitivity bound backs it (CLAUDE.md:
     # "every OPE estimate ships with ... the assumed causal graph version").
     pd.DataFrame([
-        v_behavior.to_record(),
-        v_policy.to_record(),
+        h.v_behavior.to_record(),
+        h.v_policy.to_record(),
     ]).to_csv(f"{out_dir}/ope_policy_values.csv", index=False)
-    ladder.to_csv(f"{out_dir}/ope_ladder.csv", index=False)
-    sens.to_csv(f"{out_dir}/sensitivity.csv", index=False)
-    contrasts.to_csv(f"{out_dir}/aipw_contrasts.csv", index=False)
+    h.ladder.to_csv(f"{out_dir}/ope_ladder.csv", index=False)
+    h.sensitivity.to_csv(f"{out_dir}/sensitivity.csv", index=False)
+    h.contrasts.to_csv(f"{out_dir}/aipw_contrasts.csv", index=False)
     pd.DataFrame([cmp.to_record()]).to_csv(f"{out_dir}/version_comparison.csv", index=False)
     print(f"\n  saved: {out_dir}/{{q_by_action,ope_policy_values,ope_ladder,sensitivity,"
           "aipw_contrasts,version_comparison}.csv")
+    pd.DataFrame([h.report]).to_csv(f"{out_dir}/judge.csv", index=False)
 
 
 if __name__ == "__main__":

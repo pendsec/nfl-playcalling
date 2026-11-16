@@ -224,7 +224,8 @@ def _diagnose(ds: Dataset, cfg: dict, model: BehaviorModel, calibrated: bool) ->
     memorized its training rows assigns the taken action a near-1 propensity, so
     1/pi_b ~ 1 and overlap looks excellent no matter how thin the real support
     is. Rows whose class could not be cross-fitted are excluded from the metrics
-    and counted in `n_excluded_rare`.
+    and counted in `n_excluded_rare`. Folds hold whole games: with a snap's
+    game-mates in the training folds its prediction would be optimistic too.
     """
     seed = cfg["seed"]
     X = ds.df[ds.state_cols]
@@ -232,7 +233,8 @@ def _diagnose(ds: Dataset, cfg: dict, model: BehaviorModel, calibrated: bool) ->
     n = len(y)
     min_count = int(pd.Series(y).value_counts().min())
 
-    splits, rare = _cv_splits(y, cfg["behavior_model"].get("cross_fit_folds", 3), seed)
+    splits, rare = _cv_splits(y, cfg["behavior_model"].get("cross_fit_folds", 3), seed,
+                              ds.df["game_id"].to_numpy())       # whole games per fold
 
     if splits:
         full = np.full((n, ds.n_actions), np.nan)

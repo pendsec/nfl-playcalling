@@ -15,19 +15,12 @@ advertising an unbiasedness this method does not have.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from _config import CFG
 
 from src.data.load import generate_synthetic, N_SHELLS
-from src.data.features import build_dataset
 from src.models.imputation import (add_team_shell_tendency,
                                    assert_imputer_features, build_imputation_frame,
                                    fit_shell_imputer, imputer_features, pool_rubin,
@@ -39,9 +32,8 @@ CAT = ["formation", "qb_location"]
 
 
 @pytest.fixture(scope="module")
-def frame():
-    ds = build_dataset(generate_synthetic(9000, seed=7), CFG)
-    df = ds.df.copy()
+def frame(fitted):
+    df = fitted["ds"].df.copy()          # generate_synthetic(9000, seed=7) under CFG
     df["shell"] = (df["action"] // 2).astype(int)
     df["charted"] = True
     df["defteam"] = "SYN"

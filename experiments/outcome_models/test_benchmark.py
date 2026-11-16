@@ -6,15 +6,10 @@ it judged every candidate by. Run with `pytest experiments`.
 from __future__ import annotations
 
 import copy
-import os
-import sys
 
 import numpy as np
 import pytest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tests"))
 
 pytest.importorskip("econml")
 
@@ -22,8 +17,7 @@ from _config import CFG_L1
 from experiments.outcome_models.benchmark import (CANDIDATES, advantages, calibration_slope,
                                                   fit_candidate, pseudo_outcomes,
                                                   supported_argmax)
-from src.data.features import build_dataset, time_aware_split
-from src.data.load import generate_synthetic_alignment, true_alignment_q
+from src.data.load import true_alignment_q
 from src.models.behavior.propensity import fit_behavior_model
 from src.models.outcome.q_model import fit_q_ensemble
 
@@ -35,11 +29,8 @@ def _cfg(**outcome):
 
 
 @pytest.fixture(scope="module")
-def league():
-    pbp = generate_synthetic_alignment(12000, seed=3, conf_strength=0.0,
-                                       seasons=CFG_L1["data"]["seasons"])
-    ds = build_dataset(pbp, CFG_L1)
-    train, test = time_aware_split(ds, CFG_L1["data"]["holdout_season"])
+def league(synthetic_league):
+    train, test = synthetic_league(12000, seed=3)
     pi_b = fit_behavior_model(train, CFG_L1, diagnose=False)[0].propensity(test.df)
     return dict(train=train, test=test, q_true=true_alignment_q(test.df), pi_b=pi_b)
 

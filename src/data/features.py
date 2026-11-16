@@ -215,14 +215,11 @@ def build_level2_dataset(ds1: Dataset, cfg: dict) -> Dataset:
     shell = shell[shell.notna()].astype(int)
 
     thr = cfg["action"].get("level2", {}).get("blitz_rusher_threshold", 5)
-    rushers = pd.to_numeric(df["number_of_pass_rushers"], errors="coerce").fillna(4)
-    blitz = (rushers >= thr).astype(int)
-
     df["l1_action"] = df[ds1.action_col].astype(int)
     for axis, comp in level1_components(df["l1_action"].to_numpy(), cfg).items():
         df[L1_STATE_COLUMNS[axis]] = comp.astype(float)
     labels = level2_labels(cfg)
-    df["action"] = (shell * 2 + blitz).to_numpy()
+    df["action"] = _shell_pressure_action(df, shell, thr)
     df["action_label"] = df["action"].map(labels)
 
     return Dataset(
@@ -331,6 +328,23 @@ def _label_level1(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     return df
 
 
+def _slice_mask(df: pd.DataFrame, cfg: dict, play_types: list[str]) -> pd.Series:
+    """Rows in the configured slice: the play types given, the team and down in
+    `cfg['data']`, a recorded EPA / distance / down, no spikes or kneels.
+    `build_dataset` and `slice_report` both filter with it, so the report counts
+    the same slice the models see."""
+    team, down = cfg["data"]["team"], cfg["data"].get("down")
+    mask = (df["play_type"].isin(play_types) & df["epa"].notna()
+            & df["ydstogo"].notna() & df["down"].notna())
+    if team not in (None, "all"):
+        mask &= df["defteam"] == team
+    if down not in (None, "all"):
+        mask &= df["down"] == down
+    if "play_type_nfl" in df.columns:
+        mask &= ~df["play_type_nfl"].isin(["SPIKE", "KNEEL"])
+    return mask
+
+
 def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
     """Turn raw play-by-play into the (S, A, R) table.
 
@@ -341,24 +355,16 @@ def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
     Set `cfg['data']['down']` to an int to restrict to one down, or to "all" /
     None for every down (the default).
     """
-    team = cfg["data"]["team"]
-    down = cfg["data"].get("down")
-    # Default keeps both play types so a config that omits this key behaves as
-    # it did before the key existed.
-    play_types = cfg["data"].get("play_types", ["pass", "run"])
+    scheme = action_scheme(cfg)
+    if scheme == "level2":
+        raise ValueError("action.scheme level2 is built from the level-1 dataset: "
+                         "use build_level2_dataset(build_dataset(pbp, level-1 cfg), cfg)")
     df = pbp.copy()
 
     # ── 1. Filter to the slice ───────────────────────────────────────────────
-    mask = (
-        (df["play_type"].isin(play_types))
-        & (df["epa"].notna())
-        & (df["ydstogo"].notna())
-        & (df["down"].notna())
-    )
-    if team not in (None, "all"):
-        mask &= df["defteam"] == team
-    if down not in (None, "all"):
-        mask &= df["down"] == down
+    # Default keeps both play types so a config that omits this key behaves as
+    # it did before the key existed.
+    mask = _slice_mask(df, cfg, cfg["data"].get("play_types", ["pass", "run"]))
     if cfg["data"].get("use_ftn", False):
         # Declaring use_ftn means the model conditions on FTN-charted features,
         # so a play FTN never charted has none to condition on. Defaulting them
@@ -367,12 +373,9 @@ def build_dataset(pbp: pd.DataFrame, cfg: dict) -> Dataset:
         # exists to prevent, just scattered instead of systematic. Small: ~0.3%
         # of the slice, but not a random 0.3% (their mean reward differs).
         mask &= df[FTN_PRESNAP_DEFENSE[0]].notna()
-    if "play_type_nfl" in df.columns:
-        mask &= ~df["play_type_nfl"].isin(["SPIKE", "KNEEL"])
     df = df[mask].copy()
 
     # ── 2. Action labeling (treatment) ───────────────────────────────────────
-    scheme = action_scheme(cfg)
     if scheme == "level1":
         df = _label_level1(df, cfg)
         labels = level1_labels(cfg)
@@ -424,16 +427,9 @@ def slice_report(pbp: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     Reporting charted-vs-total per play type puts that in the run log, next to
     the `play_types` restriction it justifies.
     """
-    team = cfg["data"]["team"]
     kept = cfg["data"].get("play_types", ["pass", "run"])
-    df = pbp[
-        pbp["epa"].notna() & pbp["ydstogo"].notna() & pbp["down"].notna()
-        & pbp["play_type"].isin(["pass", "run"])
-    ]
-    if team not in (None, "all"):
-        df = df[df["defteam"] == team]
-    if "play_type_nfl" in df.columns:
-        df = df[~df["play_type_nfl"].isin(["SPIKE", "KNEEL"])]
+    # Both play types, whatever `play_types` keeps: the report shows what it drops.
+    df = pbp[_slice_mask(pbp, cfg, ["pass", "run"])]
 
     if action_scheme(cfg) == "level1":
         # The alignment is labeled wherever personnel parses — coverage charting
@@ -477,15 +473,16 @@ def _label_actions(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     else:
         shell = shell.fillna(3)  # default to Cover-3 (the modal shell)
 
-    # Create categorical blitz variable
-    thr = cfg["action"]["blitz_rusher_threshold"]
-    rushers = pd.to_numeric(df["number_of_pass_rushers"], errors="coerce").fillna(4)
-    is_blitz = (rushers >= thr).astype(int)
-
-    # Create numeric action variable based on shell coverage and blitz indicator
-    df["action"] = shell.astype(int).to_numpy() * 2 + is_blitz.to_numpy()
+    df["action"] = _shell_pressure_action(df, shell, cfg["action"]["blitz_rusher_threshold"])
     df["action_label"] = df["action"].map(ACTION_LABELS)
     return df
+
+
+def _shell_pressure_action(df: pd.DataFrame, shell: pd.Series, threshold: int) -> np.ndarray:
+    """Shell x pressure -> action id `shell * 2 + blitz`, blitz meaning at least
+    `threshold` pass rushers (an unrecorded count reads as 4: no blitz)."""
+    rushers = pd.to_numeric(df["number_of_pass_rushers"], errors="coerce").fillna(4)
+    return shell.astype(int).to_numpy() * 2 + (rushers >= threshold).astype(int).to_numpy()
 
 
 def _build_state(df: pd.DataFrame, per_offense: bool = False,

@@ -10,15 +10,11 @@ score every group once.
 
 from __future__ import annotations
 
-import os
-import sys
 
 import numpy as np
 import pandas as pd
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _config import CFG_INV, CFG_L1
 from src.data.features import build_dataset, level1_components, time_aware_split
